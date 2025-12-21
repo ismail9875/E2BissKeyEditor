@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 # Coded Using Ai Tools *** Ismail9875 ***
 # *** *** *** *** *** ***
@@ -3154,42 +3155,21 @@ class OptionMenuScreen(Screen):
         try:
             if os.path.exists(version_path):
                 with open(version_path, 'r') as f:
-                    return f.read().strip()
+                    version = f.read().strip()
+                    print(f"DEBUG: Current version from file: '{version}'")
+                    return version
             else:
+                print("DEBUG: Version file not found at:", version_path)
                 return "Unknown"
         except Exception as e:
             print(f"DEBUG: get_current_version error: {e}")
             return "Unknown"
-
-    def download_file(self, url, destination):
-        """تحميل ملف من URL باستخدام twisted"""
-        try:
-            from twisted.internet import reactor, defer
-            
-            def download_callback(result):
-                print(f"DEBUG: Download completed: {destination}")
-                return True
-                
-            def download_error(failure):
-                print(f"DEBUG: Download error: {failure}")
-                return False
-                
-            # استخدام downloadPage من twisted
-            d = downloadPage(url.encode('utf-8'), destination.encode('utf-8'))
-            d.addCallback(download_callback)
-            d.addErrback(download_error)
-            return d
-            
-        except Exception as e:
-            print(f"DEBUG: download_file error: {e}")
-            return None
 
     def simple_download_file(self, url, destination):
         """تحميل ملف باستخدام طريقة أبسط"""
         try:
             import socket
             import urllib
-            import urllib.request
             
             # إنشاء المجلد إذا لم يكن موجوداً
             os.makedirs(os.path.dirname(destination), exist_ok=True)
@@ -3197,8 +3177,10 @@ class OptionMenuScreen(Screen):
             # زيادة وقت المهلة
             socket.setdefaulttimeout(30)
             
+            print(f"DEBUG: Downloading from {url} to {destination}")
+            
             # تحميل الملف
-            urllib.request.urlretrieve(url, destination)
+            urllib.urlretrieve(url, destination)
             print(f"DEBUG: File downloaded successfully: {destination}")
             return True
             
@@ -3208,82 +3190,140 @@ class OptionMenuScreen(Screen):
 
     def get_github_version(self):
         """الحصول على الإصدار من مستودع GitHub"""
-        # استبدل هذا الرابط برابط مستودعك الحقيقي
         github_version_url = "https://raw.githubusercontent.com/ismail9875/E2BissKeyEditor/refs/heads/main/version"
         
-        temp_version = "/tmp/github_version.txt"
+        print(f"DEBUG: Getting GitHub version from: {github_version_url}")
+        
         try:
-            # تحميل ملف الإصدار
-            if self.simple_download_file(github_version_url, temp_version):
-                if os.path.exists(temp_version):
-                    with open(temp_version, 'r') as f:
-                        github_version = f.read().strip()
+            import socket
+            import urllib
+            
+            # زيادة وقت المهلة
+            socket.setdefaulttimeout(15)
+            
+            # إنشاء طلب
+            print("DEBUG: Opening URL connection...")
+            
+            # استخدام urllib لتحميل الملف
+            temp_file = "/tmp/github_version.tmp"
+            
+            try:
+                urllib.urlretrieve(github_version_url, temp_file)
+                
+                if os.path.exists(temp_file):
+                    with open(temp_file, 'r') as f:
+                        content = f.read().strip()
+                    
+                    print(f"DEBUG: GitHub version content: '{content}'")
                     
                     # تنظيف الملف المؤقت
-                    if os.path.exists(temp_version):
-                        os.remove(temp_version)
+                    os.remove(temp_file)
                     
-                    return github_version
-            return None
-            
-        except Exception as e:
-            print(f"DEBUG: get_github_version error: {e}")
-            # تنظيف الملف المؤقت في حالة الخطأ
-            if os.path.exists(temp_version):
-                os.remove(temp_version)
-            return None
-
-    def check_for_updates(self):
-        """التحقق من وجود تحديثات"""
-        try:
-            current_version = self.get_current_version()
-            github_version = self.get_github_version()
-            
-            print(f"DEBUG: Current version: {current_version}, GitHub version: {github_version}")
-            
-            if not github_version:
-                return (False, "Cannot connect to GitHub")
-            
-            # مقارنة الإصدارات
-            if current_version == "Unknown":
-                return (True, f"Update available: {github_version}")
-            elif self.compare_versions(github_version, current_version) > 0:
-                return (True, f"Update available: {current_version} → {github_version}")
-            elif current_version == github_version:
-                return (False, "You have the latest version")
-            else:
-                return (False, "You have the latest version")
+                    if content:
+                        return content
+                    else:
+                        print("DEBUG: GitHub version file is empty")
+                        return None
+                else:
+                    print("DEBUG: Failed to download version file")
+                    return None
+                    
+            except Exception as download_error:
+                print(f"DEBUG: Download error: {download_error}")
+                return None
                 
         except Exception as e:
-            return (False, f"Error: {str(e)}")
+            print(f"DEBUG: get_github_version general error: {e}")
+            return None
 
-    def compare_versions(self, v1, v2):
-        """مقارنة رقمين إصدار"""
-        try:
-            # تحويل الإصدارات إلى قوائم من الأرقام
-            v1_parts = [int(x) for x in v1.split('.')]
-            v2_parts = [int(x) for x in v2.split('.')]
-            
-            # مقارنة كل جزء
-            for i in range(max(len(v1_parts), len(v2_parts))):
-                v1_part = v1_parts[i] if i < len(v1_parts) else 0
-                v2_part = v2_parts[i] if i < len(v2_parts) else 0
-                
-                if v1_part > v2_part:
-                    return 1
-                elif v1_part < v2_part:
-                    return -1
-            
+    def compare_versions_safe(self, v1, v2):
+        """مقارنة آمنة للإصدارات"""
+        print(f"DEBUG: compare_versions_safe called with: v1='{v1}', v2='{v2}'")
+        
+        # إذا كان أي من الإصدارين None، لا يمكن المقارنة
+        if v1 is None or v2 is None:
+            print(f"DEBUG: One version is None: v1={v1}, v2={v2}")
             return 0
+        
+        # تحويل إلى سلسلة نصية
+        str_v1 = str(v1).strip()
+        str_v2 = str(v2).strip()
+        
+        print(f"DEBUG: Comparing string versions: '{str_v1}' vs '{str_v2}'")
+        
+        # إذا كانت الإصدارات متطابقة نصياً
+        if str_v1 == str_v2:
+            print("DEBUG: Versions are equal (string comparison)")
+            return 0
+        
+        # محاولة تحويل إلى أرقام عائمة
+        try:
+            num_v1 = float(str_v1)
+            num_v2 = float(str_v2)
             
-        except:
-            # في حالة وجود خطأ في التحويل، استخدم المقارنة النصية
-            if v1 > v2:
+            print(f"DEBUG: Numeric comparison: {num_v1} vs {num_v2}")
+            
+            if num_v1 > num_v2:
+                print("DEBUG: v1 > v2")
                 return 1
-            elif v1 < v2:
+            elif num_v1 < num_v2:
+                print("DEBUG: v1 < v2")
                 return -1
             else:
+                print("DEBUG: v1 == v2 (numeric)")
                 return 0
+                
+        except ValueError:
+            # إذا لم يمكن تحويلها إلى أرقام، استخدم المقارنة النصية
+            print("DEBUG: Using string comparison (not numeric)")
+            if str_v1 > str_v2:
+                print("DEBUG: v1 > v2 (string)")
+                return 1
+            elif str_v1 < str_v2:
+                print("DEBUG: v1 < v2 (string)")
+                return -1
+            else:
+                print("DEBUG: v1 == v2 (string)")
+                return 0
+        except Exception as e:
+            print(f"DEBUG: Error in compare_versions_safe: {e}")
+            return 0
+
+    def check_for_updates_safe(self):
+        """التحقق من التحديثات بطريقة آمنة"""
+        try:
+            print("DEBUG: check_for_updates_safe called")
+            
+            current_version = self.get_current_version()
+            print(f"DEBUG: Current version: '{current_version}'")
+            
+            github_version = self.get_github_version()
+            print(f"DEBUG: GitHub version: '{github_version}'")
+            
+            # إذا لم نتمكن من الحصول على إصدار GitHub
+            if github_version is None:
+                return (False, "❌ لا يمكن الاتصال بخادم GitHub")
+            
+            # إذا كان الإصدار الحالي غير معروف
+            if current_version == "Unknown":
+                return (True, f"📦 تحديث متاح: {github_version}")
+            
+            # مقارنة الإصدارات
+            comparison = self.compare_versions_safe(github_version, current_version)
+            print(f"DEBUG: Comparison result: {comparison}")
+            
+            if comparison > 0:
+                return (True, f"📦 تحديث متاح!\nالحالي: {current_version}\nالجديد: {github_version}")
+            elif comparison == 0:
+                return (False, "✅ لديك أحدث إصدار")
+            else:
+                # إذا كان الإصدار الحالي أحدث
+                return (False, "✅ لديك أحدث إصدار")
+                
+        except Exception as e:
+            error_msg = f"خطأ في التحقق من التحديثات: {str(e)[:50]}"
+            print(f"DEBUG: check_for_updates_safe error: {e}")
+            return (False, error_msg)
 
     def perform_update(self):
         """تنفيذ عملية التحديث"""
@@ -3292,7 +3332,7 @@ class OptionMenuScreen(Screen):
             self.session.openWithCallback(
                 self.confirm_update_callback,
                 MessageBox,
-                "Do you want to update the plugin?\nThe GUI will restart after update.",
+                "هل تريد تحديث البلوجين؟\nسيتم إعادة تشغيل الواجهة بعد التحديث.",
                 MessageBox.TYPE_YESNO
             )
             
@@ -3300,7 +3340,7 @@ class OptionMenuScreen(Screen):
             print(f"DEBUG: perform_update error: {e}")
             self.session.open(
                 MessageBox,
-                f"Update error: {str(e)}",
+                f"خطأ في التحديث: {str(e)}",
                 MessageBox.TYPE_ERROR
             )
 
@@ -3315,7 +3355,7 @@ class OptionMenuScreen(Screen):
             # عرض رسالة التحديث
             self.update_message = self.session.open(
                 MessageBox,
-                "Checking for updates...\nPlease wait.",
+                "جاري التحقق من التحديثات...\nيرجى الانتظار.",
                 MessageBox.TYPE_INFO,
                 timeout=None
             )
@@ -3335,7 +3375,7 @@ class OptionMenuScreen(Screen):
                 self.update_message.close()
             self.session.open(
                 MessageBox,
-                f"Update failed: {str(e)}",
+                f"فشل التحديث: {str(e)}",
                 MessageBox.TYPE_ERROR
             )
 
@@ -3354,7 +3394,7 @@ class OptionMenuScreen(Screen):
                 self.session.open(
                     MessageBox,
                     message,
-                    MessageBox.TYPE_ERROR if "Error" in message or "Failed" in message else MessageBox.TYPE_INFO
+                    MessageBox.TYPE_ERROR if "فشل" in message or "خطأ" in message else MessageBox.TYPE_INFO
                 )
         else:
             # استمرار الانتظار
@@ -3367,7 +3407,7 @@ class OptionMenuScreen(Screen):
             
             self.session.open(
                 MessageBox,
-                "✓ Update completed successfully!\nRestarting GUI...",
+                "✓ تم التحديث بنجاح!\nجاري إعادة تشغيل الواجهة...",
                 MessageBox.TYPE_INFO,
                 timeout=2
             )
@@ -3381,7 +3421,7 @@ class OptionMenuScreen(Screen):
             print(f"DEBUG: restart_gui error: {e}")
             self.session.open(
                 MessageBox,
-                "Update completed. Please restart GUI manually.",
+                "تم التحديث. يرجى إعادة تشغيل الواجهة يدوياً.",
                 MessageBox.TYPE_INFO
             )
 
@@ -3397,13 +3437,16 @@ class OptionMenuScreen(Screen):
     def keyYellow(self):
         """زر الأصفر - التحقق من التحديثات"""
         try:
-            update_available, message = self.check_for_updates()
+            print("DEBUG: keyYellow pressed")
+            update_available, message = self.check_for_updates_safe()
+            
+            print(f"DEBUG: Update check result: available={update_available}, message={message}")
             
             if update_available:
                 self.session.openWithCallback(
                     self.update_confirmation_callback,
                     MessageBox,
-                    f"{message}\n\nDo you want to update now?",
+                    f"{message}\n\nهل تريد التحديث الآن؟",
                     MessageBox.TYPE_YESNO
                 )
             else:
@@ -3418,7 +3461,7 @@ class OptionMenuScreen(Screen):
             print(f"DEBUG: keyYellow error: {e}")
             self.session.open(
                 MessageBox,
-                f"Update check error: {str(e)}",
+                f"خطأ في التحقق من التحديثات: {str(e)[:50]}",
                 MessageBox.TYPE_ERROR
             )
 
@@ -3427,7 +3470,6 @@ class OptionMenuScreen(Screen):
         if result:
             self.perform_update()
 
-    # باقي الدوال كما هي بدون تغيير
     def keyOk(self):
         """زر OK - تغيير الخيار المحدد"""
         try:
@@ -3448,7 +3490,7 @@ class OptionMenuScreen(Screen):
                     
                     self.session.open(
                         MessageBox,
-                        f"✓ Hash Logic changed to: {new_value}",
+                        f"✓ تم تغيير منطق الهاش إلى: {new_value}",
                         MessageBox.TYPE_INFO,
                         timeout=2
                     )
@@ -3464,10 +3506,10 @@ class OptionMenuScreen(Screen):
                     # تحديث القائمة
                     self.setupMenuList()
                     
-                    status = "Enabled" if new_value else "Disabled"
+                    status = "مفعل" if new_value else "معطل"
                     self.session.open(
                         MessageBox,
-                        f"✓ Auto Restart: {status}",
+                        f"✓ إعادة التشغيل التلقائي: {status}",
                         MessageBox.TYPE_INFO,
                         timeout=2
                     )
@@ -3500,14 +3542,10 @@ class OptionMenuScreen(Screen):
                     "version",
                     "__init__.py",
                     "plugin.py",
-                    "BissFeedGenerator.py",
-                    "settings.py",
-                    "tools.py",
-                    # أضف الملفات الأخرى حسب الحاجة
                 ]
                 
-                # رابط المستودع (استبدله برابط مستودعك الحقيقي)
-                github_base_url = "https://raw.githubusercontent.com/yourusername/yourrepo/main"
+                # رابط المستودع
+                github_base_url = "https://raw.githubusercontent.com/ismail9875/E2BissKeyEditor/refs/heads/main"
                 
                 # مجلد البلوجين
                 plugin_folder = "/usr/lib/enigma2/python/Plugins/Extensions/E2BissKeyEditor"
@@ -3525,17 +3563,17 @@ class OptionMenuScreen(Screen):
                     file_url = f"{github_base_url}/{filename}"
                     destination = os.path.join(temp_folder, filename)
                     
-                    print(f"DEBUG: Downloading {filename}...")
+                    print(f"DEBUG: Downloading {filename} from {file_url}")
                     
                     if self.screen.simple_download_file(file_url, destination):
                         downloaded_files += 1
-                        print(f"DEBUG: ✓ Downloaded {filename}")
+                        print(f"DEBUG: ✓ تم تحميل {filename}")
                     else:
-                        print(f"DEBUG: ✗ Failed to download {filename}")
+                        print(f"DEBUG: ✗ فشل تحميل {filename}")
                 
                 if downloaded_files > 0:
                     # نسخ الملفات إلى مجلد البلوجين
-                    print("DEBUG: Copying files to plugin folder...")
+                    print("DEBUG: نسخ الملفات إلى مجلد البلوجين...")
                     
                     for item in os.listdir(temp_folder):
                         src = os.path.join(temp_folder, item)
@@ -3543,20 +3581,20 @@ class OptionMenuScreen(Screen):
                         
                         try:
                             shutil.copy2(src, dst)
-                            print(f"DEBUG: ✓ Copied {item}")
+                            print(f"DEBUG: ✓ تم نسخ {item}")
                         except Exception as e:
-                            print(f"DEBUG: ✗ Failed to copy {item}: {e}")
+                            print(f"DEBUG: ✗ فشل نسخ {item}: {e}")
                     
                     # تنظيف المجلد المؤقت
                     shutil.rmtree(temp_folder)
                     
-                    self.result = (True, "✓ Update completed successfully")
+                    self.result = (True, "✓ تم التحديث بنجاح")
                 else:
-                    self.result = (False, "✗ Failed to download update files")
+                    self.result = (False, "✗ فشل تحميل ملفات التحديث")
                     
             except Exception as e:
                 print(f"DEBUG: UpdateThread error: {e}")
-                self.result = (False, f"✗ Update error: {str(e)}")
+                self.result = (False, f"✗ خطأ في التحديث: {str(e)[:50]}")
 
     def on_custom_path_set(self, result=None):
         """Callback بعد تعيين المسار المخصص"""
@@ -3566,7 +3604,7 @@ class OptionMenuScreen(Screen):
         if result:
             self.session.open(
                 MessageBox,
-                "✓ Custom path configured successfully",
+                "✓ تم تعيين المسار المخصص بنجاح",
                 MessageBox.TYPE_INFO,
                 timeout=2
             )
@@ -3576,15 +3614,15 @@ class OptionMenuScreen(Screen):
         try:
             # عرض ملخص الإعدادات
             hash_logic = get_hash_logic()
-            auto_restart = "Enabled" if get_restart_emu() else "Disabled"
-            use_custom_path = "Enabled" if get_use_custom_path() else "Disabled"
+            auto_restart = "مفعل" if get_restart_emu() else "معطل"
+            use_custom_path = "مفعل" if get_use_custom_path() else "معطل"
             current_version = self.get_current_version()
             
-            message = "✓ Settings saved!\n\n"
-            message += f"• Hash Logic: {hash_logic}\n"
-            message += f"• Auto Restart: {auto_restart}\n"
-            message += f"• Custom Path: {use_custom_path}\n"
-            message += f"• Version: {current_version}"
+            message = "✓ تم حفظ الإعدادات!\n\n"
+            message += f"• منطق الهاش: {hash_logic}\n"
+            message += f"• إعادة التشغيل التلقائي: {auto_restart}\n"
+            message += f"• المسار المخصص: {use_custom_path}\n"
+            message += f"• الإصدار: {current_version}"
             
             self.session.open(
                 MessageBox,
@@ -3599,7 +3637,7 @@ class OptionMenuScreen(Screen):
             print(f"DEBUG: keySave error: {e}")
             self.session.open(
                 MessageBox,
-                f"Error: {str(e)[:50]}",
+                f"خطأ: {str(e)[:50]}",
                 MessageBox.TYPE_ERROR,
                 timeout=3
             )
@@ -4792,13 +4830,13 @@ class HorizontalHexInput(Screen):
                 use_custom_path_status = "Yes" if get_use_custom_path() else "No"
                 
                 message_parts = [
-                    " Key saved successfully!\n\n",
-                    f" Hash: {self.selected_hash}\n",
-                    f" Key: {key16}\n",
-                    f" Hash Logic: {hash_logic_text}\n",
-                    f" Auto Restart: {auto_restart_status}\n",
-                    f" Custom Path: {use_custom_path_status}\n",
-                    f" {save_message}"
+                    "✅ Key saved successfully!\n\n",
+                    f"🔑 Hash: {self.selected_hash}\n",
+                    f"🔐 Key: {key16}\n",
+                    f"🎯 Hash Logic: {hash_logic_text}\n",
+                    f"⚙️ Auto Restart: {auto_restart_status}\n",
+                    f"📁 Custom Path: {use_custom_path_status}\n",
+                    f"📁 {save_message}"
                 ]
                 
                 if dvbapi_message:
@@ -4809,7 +4847,7 @@ class HorizontalHexInput(Screen):
                 
                 message = "".join(message_parts)
             else:
-                message = " Save failed!\n\n%s" % save_message
+                message = "❌ Save failed!\n\n%s" % save_message
             
             # عرض الرسالة
             self.session.open(

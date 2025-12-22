@@ -1685,7 +1685,7 @@ class OptionMenuScreen(Screen):
         self.session = session
         self.update_message = None
 
-        self["title"] = Label("BISS Key Editor Options")
+        self["title"] = Label("Plugin Options")
         self["menu"] = MenuList([])
         self["info"] = Label("Use UP/DOWN and OK")
         self["key_red"] = Label("Cancel")

@@ -1753,7 +1753,7 @@ class OptionMenuScreen(Screen):
             MessageBox,
             "جاري تنفيذ التحديث...\n\nيرجى الانتظار",
             MessageBox.TYPE_INFO,
-            timeout=0
+            timeout=2
         )
 
         from enigma import eConsoleAppContainer

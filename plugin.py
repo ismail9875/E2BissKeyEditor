@@ -3423,9 +3423,7 @@ class HorizontalHexInput(Screen):
             <convert type="FrontendInfo">AGC</convert>
         </widget>
         
-        <widget source="session.CurrentService" render="Label" position="600,300" size="120,28" font="Regular; 22" halign="left" foregroundColor="#ff00" backgroundColor="#0D000000" zPosition="2" transparent="1" text="25888" valign="center">
-            <convert type="furyBitrate">VideoBitrateUnits</convert>
-        </widget>         
+             
         <widget source="session.FrontendStatus" render="Label" position="600,330" foregroundColor="yellow" size="200,40" font="Regular; 25" backgroundColor="yellow" halign="center" valign="center" transparent="1">
             <convert type="FrontendInfo">SNRdB</convert>
         </widget>

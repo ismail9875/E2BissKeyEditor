@@ -1,0 +1,4 @@
+restart_emu=False
+UseCustomPath=True
+HashLogic=CRC32 Original
+custom_save_path=/etc/tuxbox/config/SoftCam.Key

@@ -3,11 +3,12 @@
 # cmd : wget --no-check-certificate -O - https://raw.githubusercontent.com/ismail9875/E2BissKeyEditor/refs/heads/main/installer.sh | /bin/bash
 # =====================================================================
 
+
 echo """
 # ==================================================
 #               Installer Process
 #               E2Biss Key Editor
-#               By: Ismail9875
+#                By: Ismail9875
 # ==================================================
 """
 
@@ -17,6 +18,7 @@ pluginRemote="https://raw.githubusercontent.com/ismail9875/E2BissKeyEditor/refs/
 backupPath="/tmp/E2BissKeyEditor_backup_$(date +%Y%m%d_%H%M%S)"
 backupCreated=false
 downloadFailed=false
+allFilesDownloadedSuccessfully=false
 
 # Required files list
 files=(
@@ -192,12 +194,15 @@ download_files() {
 
     if [ $successCount -eq $totalFiles ]; then
         print_message "green" "✓ All files downloaded successfully ($successCount/$totalFiles)"
+        allFilesDownloadedSuccessfully=true
         return 0
     elif [ $successCount -gt 0 ]; then
         print_message "yellow" "⚠ Partial download: $successCount of $totalFiles files"
+        allFilesDownloadedSuccessfully=false
         return 1
     else
         print_message "red" "✗ All downloads failed"
+        allFilesDownloadedSuccessfully=false
         return 2
     fi
 }
@@ -209,6 +214,41 @@ cleanup_backup() {
         rm -rf "$backupPath" 2>/dev/null
         print_message "green" "✓ Backup cleaned"
     fi
+}
+
+# Restart Enigma2 GUI
+restart_enigma2() {
+    echo ""
+    echo "========================================"
+    print_message "yellow" "All files downloaded successfully!"
+    print_message "blue" "Restarting Enigma2 GUI to apply changes..."
+    
+    # محاولة إعادة التشغيل باستخدام systemctl
+    if systemctl restart enigma2 2>/dev/null; then
+        print_message "green" "✓ Enigma2 GUI restart initiated via systemctl"
+        echo "GUI will restart in a few seconds..."
+        return 0
+    fi
+    
+    # محاولة إعادة التشغيل باستخدام init (للأنظمة القديمة)
+    print_message "blue" "Trying alternative restart method..."
+    if init 4 2>/dev/null && sleep 2 && init 3 2>/dev/null; then
+        print_message "green" "✓ Enigma2 GUI restart initiated via init"
+        echo "GUI will restart in a few seconds..."
+        return 0
+    fi
+    
+    # إذا فشلت الطرق التلقائية
+    print_message "red" "✗ Could not restart Enigma2 GUI automatically"
+    print_message "yellow" "⚠ Please restart Enigma2 GUI manually from your receiver:"
+    echo ""
+    print_message "blue" "Manual restart options:"
+    echo "  1. Menu -> Standby/Restart -> Restart GUI"
+    echo "  2. Using telnet/ssh: 'systemctl restart enigma2'"
+    echo "  3. Or: 'init 4 && sleep 2 && init 3'"
+    echo ""
+    print_message "yellow" "Note: Changes will take effect after GUI restart"
+    return 1
 }
 
 # === MAIN EXECUTION ===
@@ -231,16 +271,37 @@ check_version
 create_backup
 
 if download_files; then
-    print_message "blue" "Verifying update..."
-    if check_version; then
-        print_message "green" "✓ Update completed successfully"
+    # التحقق من أن جميع الملفات تم تحميلها بنجاح
+    if [ "$allFilesDownloadedSuccessfully" = true ]; then
+        print_message "blue" "Verifying update..."
+        if check_version; then
+            print_message "green" "✓ Update completed successfully"
+        else
+            print_message "green" "✓ Files updated successfully"
+        fi
+        cleanup_backup
+        
+        # إعادة تشغيل واجهة الإنيجما2 فقط عند اكتمال تحميل جميع الملفات
+        restart_enigma2
+        
+        exit 0
     else
-        print_message "green" "✓ Files updated successfully"
+        # حالة التحميل الجزئي (بعض الملفات فشلت)
+        downloadFailed=true
+        print_message "red" "✗ Some files failed to download"
+        
+        if restore_backup; then
+            print_message "yellow" "Original files restored due to partial download"
+        fi
+        
+        # لا تقم بإعادة التشغيل في حالة التحميل الجزئي
+        print_message "red" "⚠ Enigma2 GUI restart skipped - not all files were downloaded"
+        exit 1
     fi
-    cleanup_backup
-    exit 0
 else
+    # حالة فشل التحميل بالكامل
     downloadFailed=true
+    print_message "red" "✗ Download process failed"
 
     if restore_backup; then
         print_message "yellow" "Original files restored"
@@ -253,5 +314,9 @@ else
     done
 
     print_message "red" "✗ Update process failed"
+    
+    # لا تقم بإعادة التشغيل إذا فشل التحديث
+    print_message "yellow" "⚠ Enigma2 GUI restart skipped due to update failure"
+    
     exit 1
 fi

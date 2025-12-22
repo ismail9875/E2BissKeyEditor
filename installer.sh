@@ -1,18 +1,17 @@
 #!/bin/bash
 # =====================================================================
-# cmd : wget "--no-check-certificate" https://raw.githubusercontent.com/ismail9875/E2BissKeyEditor/refs/heads/main/installer.sh | /bin/sh
+# cmd : wget --no-check-certificate -O - https://raw.githubusercontent.com/ismail9875/E2BissKeyEditor/refs/heads/main/installer.sh | /bin/bash
 # =====================================================================
 
 echo """
 # ==================================================
 #               Installer Process
 #               E2Biss Key Editor
-#               By: Ismail
+#               By: Ismail9875
 # ==================================================
 """
 
-#pluginPath="/usr/lib/enigma2/python/Plugins/Extensions/E2BissKeyEditor"
-pluginPatg="/media/hdd/scripts"
+pluginPath="/usr/lib/enigma2/python/Plugins/Extensions/E2BissKeyEditor"
 cmd="wget -q --timeout=30 --tries=2 -O"
 pluginRemote="https://raw.githubusercontent.com/ismail9875/E2BissKeyEditor/refs/heads/main/"
 backupPath="/tmp/E2BissKeyEditor_backup_$(date +%Y%m%d_%H%M%S)"
@@ -39,6 +38,27 @@ print_message() {
         "blue") echo -e "\033[34m$message\033[0m" ;;
         *) echo "$message" ;;
     esac
+}
+
+# Check and create plugin directory if not exists
+check_and_create_plugin_directory() {
+    print_message "blue" "Checking plugin directory..."
+    
+    if [ ! -d "$pluginPath" ]; then
+        print_message "yellow" "⚠ Plugin directory does not exist: $pluginPath"
+        print_message "blue" "Creating plugin directory..."
+        
+        if mkdir -p "$pluginPath" 2>/dev/null; then
+            print_message "green" "✓ Plugin directory created successfully: $pluginPath"
+            return 0
+        else
+            print_message "red" "✗ Failed to create plugin directory: $pluginPath"
+            return 1
+        fi
+    else
+        print_message "green" "✓ Plugin directory exists: $pluginPath"
+        return 0
+    fi
 }
 
 # Internet connection check
@@ -86,7 +106,11 @@ restore_backup() {
     if [ "$backupCreated" = true ] && [ -d "$backupPath" ]; then
         print_message "yellow" "Restoring backup due to download failure..."
 
-        mkdir -p "$pluginPath"
+        # تأكد من وجود مجلد الإضافة قبل الاستعادة
+        if ! check_and_create_plugin_directory; then
+            print_message "red" "✗ Cannot restore backup - failed to create plugin directory"
+            return 1
+        fi
 
         if [ -n "$(ls -A "$backupPath" 2>/dev/null)" ]; then
             cp -rf "$backupPath/"* "$pluginPath/" 2>/dev/null
@@ -137,7 +161,11 @@ download_files() {
     local successCount=0
     local totalFiles=${#files[@]}
 
-    mkdir -p "$pluginPath"
+    # تأكد من وجود مجلد الإضافة قبل التحميل
+    if ! check_and_create_plugin_directory; then
+        print_message "red" "✗ Cannot download files - plugin directory creation failed"
+        return 2
+    fi
 
     print_message "blue" "Starting download of $totalFiles files..."
 
@@ -190,6 +218,12 @@ echo "========================================"
 
 if ! check_internet; then
     print_message "red" "Process aborted: No internet connection"
+    exit 1
+fi
+
+# التحقق من وجود مجلد الإضافة وإنشائه في بداية العملية
+if ! check_and_create_plugin_directory; then
+    print_message "red" "Process aborted: Cannot create plugin directory"
     exit 1
 fi
 

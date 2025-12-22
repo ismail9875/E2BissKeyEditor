@@ -31,8 +31,7 @@ import signal
 import time
 import shutil
 from Screens.Standby import TryQuitMainloop
-
-
+from skin import parseColor
 import socket
 from twisted.web.client import downloadPage
 import threading
@@ -3045,37 +3044,56 @@ class BissKeysBrowserScreen(Screen):
 # شاشة OptionMenuScreen المعدلة
 # =============================================
 class OptionMenuScreen(Screen):
-
+    """شاشة الإعدادات مع خيارات بسيطة"""
+    
     skin = """
-    <screen position="center,center" size="850,400" title="BISS Key Editor Options">
-        <widget name="title" position="center,5" size="500,60" font="Regular;35" halign="center" />
-        <widget name="menu" position="50,80" size="750,250" itemHeight="50" font="Regular;28" />
-        <widget name="info" position="50,340" size="750,30" font="Regular;22" halign="center" />
-        <widget name="key_yellow" position="360,350" size="140,40" font="Regular;25" />
-        <widget name="key_green" position="520,350" size="140,40" font="Regular;25" />
-        <widget name="key_red" position="200,350" size="140,40" font="Regular;25" />
+    <screen position="center,center" flags="wfNoBorder" cornerRadius="20" size="850,400" backgroundColor="#0D000000" title="BISS Key Editor Options">
+        <widget name="title" position="center,5" size="500,60" font="Regular;35" borderWidth="1" borderColor="red" halign="center" valign="center" foregroundColor="#FFD700" backgroundColor="#3C110011" cornerRadius="15" transparent="1" />
+        
+        <!-- قائمة الخيارات -->
+        <widget name="menu" position="50,80" size="750,250" itemHeight="50" font="bold,28" scrollbarMode="showOnDemand" />
+        
+        <!-- الساعة والتاريخ -->
+        <widget backgroundColor="#0D000000" foregroundColor="white" font="Regular; 50" zPosition="5" noWrap="1" valign="center" halign="center" position="630,0" render="Label" size="220,70" source="global.CurrentTime" transparent="1">
+            <convert type="ClockToText">Format: %-H:%M:%S</convert>
+        </widget>
+        <widget backgroundColor="#0D000000" foregroundColor="white" font="Regular; 40" zPosition="5" noWrap="1" valign="center" halign="left" position="20,0" render="Label" size="250,70" source="global.CurrentTime" transparent="1">
+            <convert type="ClockToText">Format:%d %b %Y</convert>
+        </widget>
+        
+        <!-- أزرار التحكم -->
+        <widget name="key_yellow" position="360,350" size="140,40" zPosition="1" font="Regular;25" halign="center" valign="center" backgroundColor="#63000000" foregroundColor="white" transparent="1" />
+        <eLabel name="yellow_button" position="340,360" size="20,20" zPosition="2" cornerRadius="10" backgroundColor="yellow" />
+        
+        <widget name="key_green"  position="520,350" size="140,40" zPosition="1" font="Regular;25" halign="center" valign="center" backgroundColor="#63000000" foregroundColor="white" transparent="1" />
+        <eLabel name="green_button" position="500,360" size="20,20" zPosition="2" cornerRadius="10" backgroundColor="green" />
+        
+        <widget name="key_red" position="200,350" size="140,40" zPosition="1" font="Regular;25" halign="center" valign="center" backgroundColor="#63000000" foregroundColor="white" transparent="1" />
+        <eLabel name="red_button" position="180,360" size="20,20" zPosition="2" cornerRadius="10" backgroundColor="red" />
+        
+        <!-- معلومات إضافية -->
+        <widget name="info" position="50,310" size="750,25" font="Regular;22" halign="center" valign="center" foregroundColor="#98FB98" backgroundColor="#3C110011" transparent="1" />
     </screen>
     """
-
-    # -----------------------------------------------------
 
     def __init__(self, session):
         Screen.__init__(self, session)
         self.session = session
-
-        self.update_thread = None
         self.update_timer = None
+        self.update_process = None
         self.update_message = None
-
+        
+        print("DEBUG: OptionMenuScreen initialized")
+        
+        # تعريف العناصر
         self["title"] = Label("BISS Key Options")
         self["menu"] = MenuList([])
-        self["info"] = Label("UP/DOWN to navigate - OK to change")
+        self["info"] = Label("Select option and press OK")
         self["key_yellow"] = Label("Update")
         self["key_green"] = Label("Save")
         self["key_red"] = Label("Cancel")
-
-        self["actions"] = ActionMap(
-            ["OkCancelActions", "ColorActions", "DirectionActions"],
+        
+        self["actions"] = ActionMap(["OkCancelActions", "ColorActions", "DirectionActions"],
             {
                 "ok": self.keyOk,
                 "cancel": self.keyCancel,
@@ -3084,219 +3102,323 @@ class OptionMenuScreen(Screen):
                 "red": self.keyCancel,
                 "up": self.keyUp,
                 "down": self.keyDown,
-            },
-            -2
-        )
-
+            }, -2)
+        
         self.onShown.append(self.setupMenuList)
 
-    # =====================================================
-    # Menu
-    # =====================================================
-
     def setupMenuList(self):
-        ensure_settings_file()
-
-        menu = []
-        menu.append("Hash Logic: %s" % get_hash_logic())
-        menu.append("Auto Restart: %s" % ("Enabled" if get_restart_emu() else "Disabled"))
-        menu.append("Custom Path: %s" % ("Enabled" if get_use_custom_path() else "Disabled"))
-        menu.append("Version: %s" % self.get_current_version())
-
-        self["menu"].setList(menu)
-
-    # =====================================================
-    # Version helpers
-    # =====================================================
+        """إعداد قائمة الخيارات"""
+        try:
+            print("DEBUG: setupMenuList called")
+            
+            # إعادة تحميل الإعدادات من ملف البلوجين
+            ensure_settings_file()
+            
+            menu_items = []
+            
+            # 1. Hash Logic
+            current_hash_logic = get_hash_logic()
+            hash_logic_text = f"Hash Logic: {current_hash_logic}"
+            menu_items.append(hash_logic_text)
+            
+            # 2. Auto Restart
+            current_auto_restart = get_restart_emu()
+            auto_restart_status = "Enabled" if current_auto_restart else "Disabled"
+            auto_restart_text = f"Auto Restart: {auto_restart_status}"
+            menu_items.append(auto_restart_text)
+            
+            # 3. Custom Path
+            use_custom_path = get_use_custom_path()
+            custom_path_status = "Enabled" if use_custom_path else "Disabled"
+            custom_path_text = f"Custom Path: {custom_path_status}"
+            menu_items.append(custom_path_text)
+            
+            # 4. Current Version
+            current_version = self.get_current_version()
+            version_text = f"Version: {current_version}"
+            menu_items.append(version_text)
+            
+            if menu_items:
+                self["menu"].setList(menu_items)
+                self["info"].setText("Use UP/DOWN to select, OK to change")
+                print(f"DEBUG: Menu list has {len(menu_items)} items")
+            else:
+                self["menu"].setList(["No options available"])
+                self["info"].setText("No options found")
+            
+        except Exception as e:
+            error_msg = f"setupMenuList error: {str(e)}"
+            print(f"DEBUG: {error_msg}")
+            self["info"].setText(error_msg[:50])
 
     def get_current_version(self):
-        path = "/usr/lib/enigma2/python/Plugins/Extensions/E2BissKeyEditor/version"
-        if not os.path.exists(path):
+        """الحصول على الإصدار الحالي"""
+        version_path = "/usr/lib/enigma2/python/Plugins/Extensions/E2BissKeyEditor/version"
+        try:
+            if os.path.exists(version_path):
+                with open(version_path, 'r') as f:
+                    version = f.read().strip()
+                    print(f"DEBUG: Current version: '{version}'")
+                    return version
+            else:
+                print("DEBUG: Version file not found")
+                return "Unknown"
+        except Exception as e:
+            print(f"DEBUG: get_current_version error: {e}")
             return "Unknown"
-        try:
-            return open(path).read().strip()
-        except:
-            return "Unknown"
-
-    def normalize_version(self, v):
-        try:
-            return [int(x) for x in v.split(".")]
-        except:
-            return []
-
-    def compare_versions(self, v1, v2):
-        a = self.normalize_version(v1)
-        b = self.normalize_version(v2)
-        return (a > b) - (a < b)
-
-    # =====================================================
-    # Network helpers
-    # =====================================================
-
-    def test_github_connection(self):
-        try:
-            sock = socket.create_connection(("raw.githubusercontent.com", 443), 10)
-            sock.close()
-            return True
-        except:
-            return False
-
-    def download_wget(self, url, dest):
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        cmd = "wget -q -O '%s' '%s'" % (dest, url)
-        return os.system(cmd) == 0 and os.path.exists(dest) and os.path.getsize(dest) > 0
-
-    # =====================================================
-    # Update check
-    # =====================================================
-
-    def check_for_updates_reliable(self):
-        if not self.test_github_connection():
-            return False, "⚠️ لا يوجد اتصال بالإنترنت"
-
-        current = self.get_current_version()
-        if current == "Unknown":
-            return False, "⚠️ لا يمكن تحديد الإصدار الحالي"
-
-        version_url = "https://raw.githubusercontent.com/ismail9875/E2BissKeyEditor/main/version"
-        tmp = "/tmp/e2biss_version"
-
-        if not self.download_wget(version_url, tmp):
-            return False, "❌ فشل الاتصال بـ GitHub"
-
-        github_version = open(tmp).read().strip()
-        os.remove(tmp)
-
-        cmp = self.compare_versions(github_version, current)
-
-        if cmp > 0:
-            return True, "📦 تحديث متاح\nالحالي: %s\nالجديد: %s" % (current, github_version)
-        elif cmp == 0:
-            return False, "✅ لديك أحدث إصدار"
-        else:
-            return False, "✅ لديك إصدار أحدث من GitHub"
-
-    # =====================================================
-    # Update execution
-    # =====================================================
 
     def keyYellow(self):
-        update, msg = self.check_for_updates_reliable()
-        if update:
+        """زر الأصفر - تنفيذ التحديث عبر أمر التلنت مباشرة"""
+        try:
+            print("DEBUG: Yellow button pressed - Direct telnet update")
+            
+            # عرض رسالة تأكيد مباشرة
             self.session.openWithCallback(
-                self.confirm_update,
+                self.confirm_telnet_update,
                 MessageBox,
-                msg + "\n\nهل تريد التحديث الآن؟",
+                "هل تريد تنفيذ التحديث الآن؟\n\n"
+                "سيتم تنفيذ الأمر التالي:\n"
+                "هل تريد تنفيذ الأمر؟"
+                "ملاحظة: قد يستغرق بضع دقائق.",
                 MessageBox.TYPE_YESNO
             )
-        else:
-            self.session.open(MessageBox, msg, MessageBox.TYPE_INFO, timeout=3)
+            
+        except Exception as e:
+            print(f"DEBUG: keyYellow error: {e}")
+            self.session.open(
+                MessageBox,
+                f"خطأ: {str(e)}",
+                MessageBox.TYPE_ERROR,
+            )
 
-    def confirm_update(self, answer):
-        if answer:
-            self.start_update()
-
-    def start_update(self):
-        self.update_message = self.session.open(
-            MessageBox,
-            "جاري تحميل التحديث...\nيرجى الانتظار",
-            MessageBox.TYPE_INFO,
-            timeout=None
-        )
-
-        self.update_thread = self.UpdateThread(self)
-        self.update_thread.start()
-
-        self.update_timer = eTimer()
-        self.update_timer.callback.append(self.check_update_status)
-        self.update_timer.start(1000, True)
-
-    def check_update_status(self):
-        if not self.update_thread.is_alive():
-            success, msg = self.update_thread.result
+    def confirm_telnet_update(self, result):
+        """تأكيد وتنفيذ تحديث التلنت"""
+        if not result:
+            self.session.open(
+                MessageBox,
+                "تم إلغاء التحديث",
+                MessageBox.TYPE_INFO,
+                timeout=2
+            )
+            return
+        
+        try:
+            # عرض رسالة الانتظار
+            self.update_message = self.session.open(
+                MessageBox,
+                "جاري تنفيذ التحديث...\nيرجى الانتظار، قد يستغرق بضع دقائق.",
+                MessageBox.TYPE_INFO,
+                timeout=None
+            )
+            
+            # بدء عملية التحديث في خيط منفصل
+            self.update_process = threading.Thread(target=self.execute_telnet_command)
+            self.update_process.start()
+            
+            # بدء التايمر للتحقق من اكتمال التحديث
+            self.update_timer = eTimer()
+            self.update_timer.callback.append(self.check_update_status)
+            self.update_timer.start(1000, True)
+            
+        except Exception as e:
+            print(f"DEBUG: confirm_telnet_update error: {e}")
             if self.update_message:
                 self.update_message.close()
+            self.session.open(
+                MessageBox,
+                f"فشل بدء التحديث: {str(e)}",
+                MessageBox.TYPE_ERROR
+            )
 
-            if success:
-                self.session.open(MessageBox, msg, MessageBox.TYPE_INFO, timeout=2)
-                self.restart_gui()
-            else:
-                self.session.open(MessageBox, msg, MessageBox.TYPE_ERROR)
+    def execute_telnet_command(self):
+        """تنفيذ أمر التلنت للتحديث"""
+        try:
+            print("DEBUG: Starting telnet update command")
+            
+            # الأمر المطلوب تنفيذه
+            cmd = "wget --no-check-certificate -O - https://raw.githubusercontent.com/ismail9875/E2BissKeyEditor/refs/heads/main/installer.sh | /bin/bash"
+            
+            print(f"DEBUG: Executing command: {cmd}")
+            
+            # تنفيذ الأمر باستخدام os.system
+            result = os.system(cmd)
+            
+            print(f"DEBUG: Command exited with code: {result}")
+            
+            # حفظ النتيجة للاستخدام لاحقاً
+            self.update_result = (result == 0, result)
+            
+        except Exception as e:
+            print(f"DEBUG: execute_telnet_command error: {e}")
+            self.update_result = (False, str(e))
+
+    def check_update_status(self):
+        """التحقق من حالة التحديث"""
+        if hasattr(self, 'update_process') and not self.update_process.is_alive():
+            if hasattr(self, 'update_message'):
+                self.update_message.close()
+            
+            if hasattr(self, 'update_result'):
+                success, result = self.update_result
+                
+                if success:
+                    # نجاح التحديث
+                    self.session.openWithCallback(
+                        self.restart_gui,
+                        MessageBox,
+                        "✓ تم تنفيذ التحديث بنجاح!\n\nهل تريد إعادة تشغيل الواجهة الآن؟",
+                        MessageBox.TYPE_YESNO
+                    )
+                else:
+                    # فشل التحديث
+                    error_msg = f"✗ فشل التحديث"
+                    if isinstance(result, int):
+                        error_msg += f"\nكود الخروج: {result}"
+                    else:
+                        error_msg += f"\n{str(result)[:100]}"
+                    
+                    self.session.open(
+                        MessageBox,
+                        error_msg,
+                        MessageBox.TYPE_ERROR
+                    )
         else:
+            # استمرار الانتظار
             self.update_timer.start(1000, True)
 
-    def restart_gui(self):
-        self.session.open(TryQuitMainloop, 3)
-
-    # =====================================================
-    # Update Thread (DIRECT FILE UPDATE)
-    # =====================================================
-
-    class UpdateThread(threading.Thread):
-        def __init__(self, screen):
-            threading.Thread.__init__(self)
-            self.screen = screen
-            self.result = (False, "")
-
-        def run(self):
+    def restart_gui(self, result):
+        """إعادة تشغيل الواجهة بعد التحديث"""
+        if result:
             try:
-                files = [
-                    "version",
-                    "__init__.py",
-                    "plugin.py",
-                ]
-
-                base_url = "https://raw.githubusercontent.com/ismail9875/E2BissKeyEditor/main"
-                plugin_dir = "/usr/lib/enigma2/python/Plugins/Extensions/E2BissKeyEditor"
-                temp_dir = "/tmp/e2biss_update"
-
-                if os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir)
-                os.makedirs(temp_dir)
-
-                downloaded = 0
-
-                for f in files:
-                    url = "%s/%s" % (base_url, f)
-                    dest = "%s/%s" % (temp_dir, f)
-                    if self.screen.download_wget(url, dest):
-                        downloaded += 1
-
-                if downloaded != len(files):
-                    self.result = (False, "❌ فشل تحميل جميع ملفات التحديث")
-                    return
-
-                for f in files:
-                    shutil.copy2(
-                        "%s/%s" % (temp_dir, f),
-                        "%s/%s" % (plugin_dir, f)
-                    )
-
-                shutil.rmtree(temp_dir)
-                self.result = (True, "✓ تم تحديث البلوجين بنجاح")
-
+                from Screens.Standby import TryQuitMainloop
+                self.session.open(TryQuitMainloop, 3)  # 3 = Restart GUI
             except Exception as e:
-                self.result = (False, "خطأ أثناء التحديث: %s" % str(e))
-
-    # =====================================================
-    # UI keys
-    # =====================================================
+                print(f"DEBUG: restart_gui error: {e}")
+                # طريقة بديلة
+                import os
+                os.system("init 4 && sleep 2 && init 3")
+        else:
+            self.session.open(
+                MessageBox,
+                "تم التحديث. يمكنك إعادة التشغيل يدوياً لاحقاً.",
+                MessageBox.TYPE_INFO,
+                timeout=3
+            )
 
     def keyOk(self):
-        item = self["menu"].getCurrent()
-        if item and item.startswith("Version"):
-            self.keyYellow()
+        """زر OK - تغيير الخيار المحدد"""
+        try:
+            current_index = self["menu"].getSelectedIndex()
+            current_item = self["menu"].getCurrent()
+            
+            if current_item:
+                if "Hash Logic:" in current_item:
+                    # تغيير منطق الهاش
+                    current_value = get_hash_logic()
+                    new_value = "SID+VPID" if current_value == "CRC32 Original" else "CRC32 Original"
+                    
+                    # حفظ الإعداد الجديد في ملف البلوجين
+                    save_setting('HashLogic', new_value)
+                    
+                    # تحديث القائمة
+                    self.setupMenuList()
+                    
+                    self.session.open(
+                        MessageBox,
+                        f"✓ تم تغيير منطق الهاش إلى: {new_value}",
+                        MessageBox.TYPE_INFO,
+                        timeout=2
+                    )
+                    
+                elif "Auto Restart:" in current_item:
+                    # تغيير Auto Restart
+                    current_value = get_restart_emu()
+                    new_value = not current_value
+                    
+                    # حفظ الإعداد الجديد في ملف البلوجين
+                    save_setting('restart_emu', 'True' if new_value else 'False')
+                    
+                    # تحديث القائمة
+                    self.setupMenuList()
+                    
+                    status = "مفعل" if new_value else "معطل"
+                    self.session.open(
+                        MessageBox,
+                        f"✓ إعادة التشغيل التلقائي: {status}",
+                        MessageBox.TYPE_INFO,
+                        timeout=2
+                    )
+                    
+                elif "Custom Path:" in current_item:
+                    # فتح FileBrowserScreen لتعيين المسار
+                    self.session.openWithCallback(
+                        self.on_custom_path_set,
+                        FileBrowserScreen,
+                        mode="settings"
+                    )
+                elif "Version:" in current_item:
+                    # عند الضغط على خيار الإصدار، نقوم بعملية التحديث مباشرة
+                    self.keyYellow()
+        
+        except Exception as e:
+            print(f"DEBUG: keyOk error: {e}")
+
+    def on_custom_path_set(self, result=None):
+        """Callback بعد تعيين المسار المخصص"""
+        # إعادة تحميل القائمة لعرض التحديثات
+        self.setupMenuList()
+        
+        if result:
+            self.session.open(
+                MessageBox,
+                "✓ تم تعيين المسار المخصص بنجاح",
+                MessageBox.TYPE_INFO,
+                timeout=2
+            )
 
     def keySave(self):
-        self.close()
+        """حفظ الإعدادات والخروج"""
+        try:
+            # عرض ملخص الإعدادات
+            hash_logic = get_hash_logic()
+            auto_restart = "مفعل" if get_restart_emu() else "معطل"
+            use_custom_path = "مفعل" if get_use_custom_path() else "معطل"
+            current_version = self.get_current_version()
+            
+            message = "✓ تم حفظ الإعدادات!\n\n"
+            message += f"• منطق الهاش: {hash_logic}\n"
+            message += f"• إعادة التشغيل التلقائي: {auto_restart}\n"
+            message += f"• المسار المخصص: {use_custom_path}\n"
+            message += f"• الإصدار: {current_version}"
+            
+            self.session.open(
+                MessageBox,
+                message,
+                MessageBox.TYPE_INFO,
+                timeout=3
+            )
+            
+            self.close()
+            
+        except Exception as e:
+            print(f"DEBUG: keySave error: {e}")
+            self.session.open(
+                MessageBox,
+                f"خطأ: {str(e)[:50]}",
+                MessageBox.TYPE_ERROR,
+                timeout=3
+            )
 
     def keyCancel(self):
+        """إلغاء"""
         self.close()
 
     def keyUp(self):
+        """UP"""
         self["menu"].up()
 
     def keyDown(self):
+        """DOWN"""
         self["menu"].down()
 # =============================================
 # شاشة معلومات عن الإضافة والمطور

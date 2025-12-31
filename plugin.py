@@ -11,13 +11,15 @@ import sys
 from Plugins.Plugin import PluginDescriptor
 from Screens.Screen import Screen
 from Screens.MessageBox import MessageBox
+from Screens.ChoiceBox import ChoiceBox
 from Screens.VirtualKeyBoard import VirtualKeyBoard
 from Components.ActionMap import ActionMap
 from Components.Label import Label
 from Components.MenuList import MenuList
 from Components.ScrollLabel import ScrollLabel
 from Components.ProgressBar import ProgressBar
-from Components.ConfigList import ConfigList
+from Components.config import config, ConfigSubsection, ConfigOnOff, ConfigSelection, ConfigText, getConfigListEntry
+from Components.ConfigList import ConfigList, ConfigListScreen
 from Components.Sources.StaticText import StaticText
 from datetime import datetime
 import binascii
@@ -34,14 +36,13 @@ from skin import parseColor
 import socket
 from twisted.web.client import downloadPage
 import threading
-from enigma import eServiceReference, iServiceInformation, eServiceCenter, eDVBDB, gRGB, eTimer
-import os
-import shutil
-import threading
-import subprocess
-from enigma import eTimer
-
-
+from enigma import eServiceReference, iServiceInformation, eServiceCenter, eDVBDB, gRGB, eTimer, eConsoleAppContainer
+import requests
+import re
+from distutils.version import LooseVersion
+import glob
+import concurrent.futures
+from .usingMode import *
 # استيرادات متوافقة مع Python 2 و 3
 import sys
 PY3 = sys.version_info[0] == 3
@@ -51,22 +52,6 @@ try:
 except ImportError:
     # Python 2
     from urllib2 import Request as compat_Request, urlopen as compat_urlopen
-
-# =============================================
-# مسار إعدادات البلوجين
-# =============================================
-PLUGIN_PATH = os.path.dirname(__file__)
-PLUGIN_SETTINGS_FILE = os.path.join(PLUGIN_PATH, "settings")
-
-# =============================================
-# تهيئة الإعدادات الافتراضية
-# =============================================
-DEFAULT_SETTINGS = {
-    'restart_emu': 'True',
-    'UseCustomPath': 'False',
-    'HashLogic': 'CRC32 Original',
-    'custom_save_path': '/etc/tuxbox/config/SoftCam.Key'
-}
 
 # =============================================
 # دوال قراءة/كتابة إعدادات البلوجين
@@ -163,6 +148,43 @@ def save_all_settings(new_settings):
     except Exception as e:
         print(f"ERROR saving all plugin settings: {e}")
         return False
+
+
+# =============================================
+# مسار إعدادات البلوجين
+# =============================================
+PLUGIN_PATH = os.path.dirname(__file__)
+PLUGIN_SETTINGS_FILE = os.path.join(PLUGIN_PATH, "settings")
+
+
+# Unified installer URL
+INSTALLER_CMD = (
+    "wget -q -O - " 
+    "https://raw.githubusercontent.com/ismail9875/E2BissKeyEditor/refs/heads/main/installer.sh "
+    "| /bin/bash"
+)
+
+# Initialize configuration settings
+config.plugins.E2BissKeyEditor = ConfigSubsection()
+config.plugins.E2BissKeyEditor.auto_restart = ConfigOnOff(default=True)
+config.plugins.E2BissKeyEditor.custom_path = ConfigOnOff(default=False)
+config.plugins.E2BissKeyEditor.hash_logic = ConfigSelection(
+    choices=[("sid_vpid", "SID+VPID"), ("crc32_original", "CRC32 Original")],
+    default="sid_vpid"
+)
+config.plugins.E2BissKeyEditor.custom_path_value = ConfigText(default="/etc/tuxbox/config", fixed_size=False)
+
+
+# =============================================
+# تهيئة الإعدادات الافتراضية
+# =============================================
+DEFAULT_SETTINGS = {
+    'restart_emu': 'True',
+    'UseCustomPath': 'False',
+    'HashLogic': 'CRC32 Original',
+    'custom_save_path': '/etc/tuxbox/config/SoftCam.Key'
+}
+
 
 # =============================================
 # دوال مساعدة للحصول على إعدادات محددة
@@ -602,7 +624,6 @@ for byte in range(256):
     crc_table.append(crc)
 
 def crc32(string):
-    """دالة CRC32 المطابقة للسكريبت الأصلي للكايد 2600"""
     value = 0x2600 ^ 0xffffffff
     if PY3:
         if isinstance(string, str):
@@ -621,198 +642,376 @@ def crc32(string):
 # =============================================
 # دالة إعادة تشغيل المحاكي
 # =============================================
-def restart_emu():
-    """إعادة تشغيل المحاكي بعد حفظ الشفرة - نسخة محسنة"""
-    # التحقق من تفعيل الإعادة التلقائية
-    auto_restart_enabled = get_restart_emu()
+def is_openspa_image():
+    """
+    التحقق من إذا كانت الصورة هي OpenSPA عن طريق قراءة ملف /etc/issue
+    """
+    try:
+        if os.path.exists("/etc/issue"):
+            with open("/etc/issue", 'r') as f:
+                content = f.read()
+                # البحث عن النمط المحدد في ملف /etc/issue
+                if "welcome to openspa" in content.lower() or "open spa" in content.lower():
+                    print(f"✓ Detected OpenSPA image via /etc/issue")
+                    return True
+    except Exception as e:
+        print(f"Error reading /etc/issue: {e}")
     
-    print(f"DEBUG: Auto restart setting from plugin settings: {auto_restart_enabled}")
+    # طريقة احتياطية للتحقق
+    try:
+        image_info_files = [
+            "/etc/os-release",
+            "/etc/openvision",
+            "/etc/opennfr",
+            "/etc/openatv",
+            "/etc/openpli"
+        ]
+        
+        for info_file in image_info_files:
+            if os.path.exists(info_file):
+                try:
+                    with open(info_file, 'r') as f:
+                        content = f.read().lower()
+                        if 'openspa' in content:
+                            print(f"✓ Detected OpenSPA image via {info_file}")
+                            return True
+                except:
+                    continue
+    except Exception as e:
+        print(f"Error in backup detection: {e}")
     
-    if not auto_restart_enabled:
-        print("Auto restart is disabled. Skipping emulator restart.")
-        return False
+    return False
+
+def restart_emu_spa(clean_tmp=True):
+    """
+    دالة خاصة بإعادة تشغيل المحاكي على صور OpenSPA
+    """
+    print("\n" + "=" * 50)
+    print("EXECUTING OpenSPA SPECIFIC RESTART")
+    print("=" * 50)
     
     try:
-        print("=" * 50)
-        print("Starting emulator restart process...")
-        print("=" * 50)
+        openspa_camrestart_path = "/etc/Camdcmd.sh"
         
-        # التحقق من سكريبت softcam لمعرفة المحاكي النشط
+        if not os.path.exists(openspa_camrestart_path):
+            print(f"✗ OpenSPA Camdcmd.sh not found at {openspa_camrestart_path}")
+            return {"success": False, "camdcmd_returncode": -1, "message": "failed restart emulator"}
+        
+        # تنظيف ملفات /tmp إذا مطلوب
+        if clean_tmp:
+            print("\nCleaning temp files for OpenSPA...")
+            try:
+                patterns = [
+                    '/tmp/*.info*',
+                    '/tmp/*.tmp*',
+                    '/tmp/*share*',
+                    '/tmp/*.pid*',
+                    '/tmp/*sbox*',
+                ]
+                
+                for pattern in patterns:
+                    for filepath in glob.glob(pattern):
+                        try:
+                            os.remove(filepath)
+                            print(f"  Removed: {filepath}")
+                        except:
+                            pass
+            except Exception as e:
+                print(f"Warning: Error cleaning temp files: {e}")
+        
+        # جعل السكريبت قابل للتنفيذ إذا لم يكن
+        if not os.access(openspa_camrestart_path, os.X_OK):
+            os.chmod(openspa_camrestart_path, 0o755)
+            print(f"Made {openspa_camrestart_path} executable")
+        
+        # تنفيذ سكريبت OpenSPA
+        print(f"\nExecuting OpenSPA Camdcmd.sh: {openspa_camrestart_path}")
+        result = subprocess.run(
+            openspa_camrestart_path,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        # حفظ returncode من Camdcmd.sh
+        camdcmd_returncode = result.returncode
+        
+        if camdcmd_returncode == 0:
+            print("✓ Camdcmd.sh executed successfully")
+            if result.stdout:
+                print(f"Output: {result.stdout[:200]}")
+            openspa_success = True
+        else:
+            print(f"✗ Camdcmd.sh failed with code: {camdcmd_returncode}")
+            if result.stderr:
+                print(f"Error: {result.stderr[:200]}")
+            openspa_success = False
+        
+        # الانتظار قليلاً ثم التحقق من عمل المحاكي
+        time.sleep(1)
+        
+        # التحقق من أن المحاكي يعمل بعد تنفيذ السكريبت
+        try:
+            possible_emus = ['oscam', 'ncam', 'cccam', 'mgcamd', 'gbox', 'wicardd', 'camd']
+            running_emu = None
+            running_pids = []
+            
+            for emu in possible_emus:
+                try:
+                    result = subprocess.run(['pgrep', emu],
+                                          capture_output=True, text=True)
+                    if result.returncode == 0:
+                        pids = result.stdout.strip().split('\n')
+                        running_pids.extend(pids)
+                        running_emu = emu
+                        print(f"✓ {emu} is running after Camdcmd.sh (PIDs: {', '.join(pids)})")
+                except Exception as e:
+                    continue
+            
+            if running_emu:
+                print(f"✓ OpenSPA Camdcmd.sh completed successfully - {running_emu} is running")
+                
+                # محاولة تحديث قاعدة بيانات الخدمات
+                try:
+                    from enigma import eDVBDB
+                    db = eDVBDB.getInstance()
+                    db.reloadServicelist()
+                    print("✓ Service database updated")
+                except:
+                    print("⚠ Could not update service database (non-critical)")
+                
+                # تحديد الرسالة بناءً على returncode
+                message = "restart emulator succesfully" if camdcmd_returncode == 0 else "failed restart emulator"
+                return {"success": True, "camdcmd_returncode": camdcmd_returncode, "message": message}
+            else:
+                print("⚠ No emulator detected after Camdcmd.sh")
+                # تحديد الرسالة بناءً على returncode
+                message = "restart emulator succesfully" if camdcmd_returncode == 0 else "failed restart emulator"
+                return {"success": openspa_success, "camdcmd_returncode": camdcmd_returncode, "message": message}
+        
+        except Exception as e:
+            print(f"Note: Could not verify emulator after Camdcmd.sh: {e}")
+            # تحديد الرسالة بناءً على returncode
+            message = "restart emulator succesfully" if camdcmd_returncode == 0 else "failed restart emulator"
+            return {"success": openspa_success, "camdcmd_returncode": camdcmd_returncode, "message": message}
+    
+    except subprocess.TimeoutExpired:
+        print("⚠ Camdcmd.sh timed out")
+        return {"success": False, "camdcmd_returncode": -1, "message": "failed restart emulator"}
+    
+    except Exception as e:
+        print(f"Error in restart_emu_spa: {e}")
+        traceback.print_exc()
+        return {"success": False, "camdcmd_returncode": -1, "message": "failed restart emulator"}
+
+def restart_emu_base(clean_tmp=True):
+    """
+    دالة عامة لإعادة تشغيل المحاكي للصور الأخرى غير OpenSPA
+    """
+    print("\n" + "=" * 50)
+    print("EXECUTING BASE RESTART FOR NON-OpenSPA IMAGES")
+    print("=" * 50)
+    
+    try:
+        # الحصول على اسم المحاكي النشط
+        emuname = None
+        try:
+            result = subprocess.check_output(
+                'ps -eo comm | grep -E "^(ncam|oscam|cccam|mgcamd|gbox|wicardd|camd)" | sort -u | head -n1',
+                shell=True, universal_newlines=True
+            ).strip()
+            if result:
+                emuname = result
+                print(f"Found running emulator via ps: {emuname}")
+        except (subprocess.CalledProcessError, Exception) as e:
+            print(f"Could not detect emulator via ps: {e}")
+        
+        # إذا لم نجد عبر ps، نبحث في softcam script
         softcam_script_path = '/etc/init.d/softcam'
-        active_emu = None
-        restart_cmd = None
+        active_emu_from_script = None
         
         if os.path.exists(softcam_script_path):
             print(f"Reading softcam script from: {softcam_script_path}")
             try:
                 with open(softcam_script_path, 'r') as f:
                     lines = f.readlines()
-                    
+                
                 for line in lines:
                     line_lower = line.lower()
                     if 'oscam' in line_lower:
-                        active_emu = 'oscam'
-                        restart_cmd = ['/etc/init.d/softcam.OSCam*', 'stop', '&&', 'sleep', '1', '&&', '/etc/init.d/softcam.OSCam*', 'start']
+                        active_emu_from_script = 'oscam'
                         print(f"Found OSCam in softcam script")
                         break
                     elif 'ncam' in line_lower:
-                        active_emu = 'ncam'
-                        restart_cmd = ['/etc/init.d/softcam.ncam*', 'stop', '&&', 'sleep', '1', '&&', '/etc/init.d/softcam.ncam*', 'start']
+                        active_emu_from_script = 'ncam'
                         print(f"Found NCam in softcam script")
                         break
-                    
-                if active_emu:
-                    print(f"Active emulator detected from script: {active_emu}")
+                
+                if active_emu_from_script:
+                    print(f"Active emulator from script: {active_emu_from_script}")
             except Exception as e:
                 print(f"Error reading softcam script: {e}")
         
-        # قائمة شاملة لأوامر إعادة تشغيل المحاكي
+        # تحديد المحاكي المستهدف
+        target_emu = emuname if emuname else active_emu_from_script
+        
+        if not target_emu:
+            # إذا لم نجد، نبحث عن أي محاكي قيد التشغيل
+            print("\nScanning for any running emulators...")
+            possible_emus = ['oscam', 'ncam', 'cccam', 'mgcamd', 'gbox', 'wicardd', 'camd']
+            
+            for emu in possible_emus:
+                try:
+                    result = subprocess.run(['pgrep', '-x', emu],
+                                          capture_output=True, text=True)
+                    if result.returncode == 0:
+                        target_emu = emu
+                        print(f"Found running emulator via pgrep: {target_emu}")
+                        break
+                except:
+                    continue
+        
+        if not target_emu:
+            print("No running emulator found. Will try general restart methods.")
+            target_emu = None
+        
+        # تنظيف ملفات /tmp إذا مطلوب
+        if clean_tmp and target_emu:
+            print(f"\nCleaning temp files for {target_emu}...")
+            try:
+                patterns = [
+                    '/tmp/*.info*',
+                    '/tmp/*.tmp*',
+                    f'/tmp/.{target_emu}',
+                    '/tmp/*share*',
+                    '/tmp/*.pid*',
+                    '/tmp/*sbox*',
+                    f'/tmp/{target_emu}.*',
+                    f'/tmp/*.{target_emu}'
+                ]
+                
+                for pattern in patterns:
+                    for filepath in glob.glob(pattern):
+                        try:
+                            os.remove(filepath)
+                            print(f"  Removed: {filepath}")
+                        except:
+                            pass
+            except Exception as e:
+                print(f"Warning: Error cleaning temp files: {e}")
+        
+        # إنشاء قائمة أوامر إعادة التشغيل
         restart_commands = []
         
-        # إذا تم تحديد المحاكي من السكريبت، أضف أمره أولاً
-        if restart_cmd:
-            restart_commands.append(restart_cmd)
-            print(f"Added primary restart command for {active_emu}")
+        # 1. أوامر خاصة بالمحاكي المحدد (إذا كان موجودًا)
+        if target_emu:
+            # أوامر بناءً على موقع التنفيذ
+            possible_paths = [
+                f"/usr/bin/{target_emu}",
+                f"/usr/bin/camd/{target_emu}",
+                f"/usr/bin/cam/{target_emu}",
+                f"/usr/bin/emu/{target_emu}",
+                f"/usr/bin/softcams/{target_emu}",
+                f"/usr/softcams/{target_emu}",
+                f"/var/bin/{target_emu}",
+                f"/var/emu/{target_emu}",
+                f"/usr/script/{target_emu}"
+            ]
+            
+            for emu_path in possible_paths:
+                if os.path.exists(emu_path):
+                    cmd_str = f"killall -9 {target_emu} && sleep 1 && {emu_path} &"
+                    restart_commands.append(cmd_str)
+                    print(f"Added command: {cmd_str}")
+                    break
+            
+            # أوامر systemd/service
+            restart_commands.append(f"systemctl restart {target_emu}")
+            restart_commands.append(f"service {target_emu} restart")
+            restart_commands.append(f"/etc/init.d/{target_emu} restart")
         
-        # إضافة الأوامر العامة للمحاكيات
+        # 2. أوامر softcam العامة
         restart_commands.extend([
-            # أوامر عامة للمحاكيات
-            ['/etc/init.d/softcam.OSCam*', 'restart'],  # OSCAM
-            ['/etc/init.d/softcam.ncam*', 'restart'],  # NCAM
-            ['/etc/init.d/softcam', 'restart'],        # softcam العام
+            "/etc/init.d/softcam restart",
+            "/usr/bin/restartcam",
+            "/etc/init.d/camd restart",
+            "/etc/tuxbox/.CamdReStart.sh"
         ])
         
-        # محاولة إيجاد وإعادة تشغيل المحاكي الفعلي الموجود على النظام
-        print("\nScanning for running emulators...")
-        running_emus = []
+        # 3. أوامر softcam محددة
+        if target_emu:
+            if target_emu.lower() in ['oscam', 'ncam']:
+                restart_commands.append(f"/etc/init.d/softcam.{target_emu} restart")
+                restart_commands.append(
+                    f"/etc/init.d/softcam.{target_emu} stop && sleep 1 && "
+                    f"/etc/init.d/softcam.{target_emu} start"
+                )
         
-        # قائمة المحاكيات المحتملة
-        possible_emus = ['oscam', 'ncam']
+        # 4. الأوامر العامة
+        general_commands = [
+            "pkill -9 softcam && sleep 1 && /etc/init.d/softcam start",
+            "pkill -9 oscam && sleep 1 && /etc/init.d/softcam start",
+            "pkill -9 ncam && sleep 1 && /etc/init.d/softcam start",
+            "pkill -9 cccam && sleep 1 && /etc/init.d/softcam start",
+            "systemctl daemon-reload && /etc/init.d/softcam restart",
+        ]
         
-        for emu in possible_emus:
-            try:
-                # التحقق من وجود العملية
-                if PY3:
-                    check_proc = subprocess.run(['pgrep', '-x', emu], 
-                                              capture_output=True, text=True, timeout=5)
-                else:
-                    check_proc = subprocess.Popen(['pgrep', '-x', emu], 
-                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    stdout, stderr = check_proc.communicate()
-                    check_proc.returncode = check_proc.returncode
-                    check_proc.stdout = stdout
-                    check_proc.stderr = stderr
-                
-                if check_proc.returncode == 0:
-                    running_emus.append(emu)
-                    print(f"Found running emulator: {emu} (PID: {check_proc.stdout.strip()}")
-            except:
-                continue
+        restart_commands.extend(general_commands)
         
-        # إذا وجدنا محاكي يعمل، ركز على إعادة تشغيله
-        if running_emus:
-            print(f"Found {len(running_emus)} running emulator(s): {', '.join(running_emus)}")
-            
-            # ترتيب الأوامر حسب المحاكي الموجود
-            prioritized_commands = []
-            
-            # إضافة أوامر للمحاكيات النشطة أولاً
-            for emu in running_emus:
-                # إذا كان هذا المحاكي هو المحدد من السكريبت، فهو لديه الأولوية القصوى
-                if active_emu and emu.lower() == active_emu.lower():
-                    print(f"Prioritizing {emu} (active from softcam script)")
-                
-                # إضافة أوامر systemd للمحاكي الموجود
-                prioritized_commands.append(['systemctl', 'restart', emu])
-                prioritized_commands.append(['service', emu, 'restart'])
-                prioritized_commands.append([f'/etc/init.d/{emu}', 'restart'])
-            
-            # دمج القوائم مع الحفاظ على الأولويات
-            if prioritized_commands:
-                # إضافة أوامر softcam العامة بعد الأولويات
-                prioritized_commands.append(['/etc/init.d/softcam', 'restart'])
-                prioritized_commands.append(['/usr/bin/restartcam'])
-                prioritized_commands.append(['/etc/init.d/camd', 'restart'])
-                
-                # دمج القوائم مع إعطاء الأولوية للأوامر المحددة
-                restart_commands = prioritized_commands + restart_commands
-        
-        # إزالة التكرارات من القائمة مع الحفاظ على الترتيب
+        # إزالة التكرارات
         unique_commands = []
         seen_commands = set()
-        
         for cmd in restart_commands:
-            cmd_str = ' '.join(cmd)
-            if cmd_str not in seen_commands:
-                seen_commands.add(cmd_str)
+            if cmd not in seen_commands:
+                seen_commands.add(cmd)
                 unique_commands.append(cmd)
         
         restart_commands = unique_commands
         
-        # سجل المحاولات
-        attempts_log = []
-        success = False
-        
+        # تنفيذ أوامر إعادة التشغيل (تسلسلي)
         print(f"\nTrying {len(restart_commands)} restart commands...")
         print("-" * 40)
         
-        # محاولة تنفيذ أوامر إعادة التشغيل
+        attempts_log = []
+        success = False
+        
         for idx, cmd in enumerate(restart_commands, 1):
             try:
-                cmd_str = ' '.join(cmd)
-                print(f"Attempt {idx}: {cmd_str}")
+                print(f"Attempt {idx}: {cmd}")
                 
-                # استخدام shell=True للأوامر المعقدة
-                if '&&' in cmd_str or '*' in cmd_str:
-                    if PY3:
-                        result = subprocess.run(cmd_str, shell=True, 
-                                              capture_output=True, text=True, timeout=5)
-                    else:
-                        result = subprocess.Popen(cmd_str, shell=True, 
-                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                        stdout, stderr = result.communicate()
-                        result.returncode = result.returncode
-                        result.stdout = stdout
-                        result.stderr = stderr
-                else:
-                    if PY3:
-                        result = subprocess.run(cmd, capture_output=True, 
-                                              text=True, timeout=5)
-                    else:
-                        result = subprocess.Popen(cmd, stdout=subprocess.PIPE, 
-                                                stderr=subprocess.PIPE)
-                        stdout, stderr = result.communicate()
-                        result.returncode = result.returncode
-                        result.stdout = stdout
-                        result.stderr = stderr
+                # تنفيذ الأمر
+                result = subprocess.run(
+                    cmd,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
                 
                 attempts_log.append({
-                    'command': cmd_str,
+                    'command': cmd,
                     'returncode': result.returncode,
-                    'stdout': (result.stdout[:100] if result.stdout else '') if PY3 else (result.stdout[:100] if result.stdout else ''),
-                    'stderr': (result.stderr[:100] if result.stderr else '') if PY3 else (result.stderr[:100] if result.stderr else '')
+                    'stdout': result.stdout[:100] if result.stdout else '',
+                    'stderr': result.stderr[:100] if result.stderr else ''
                 })
                 
                 if result.returncode == 0:
-                    print(f"✓ Success with: {cmd_str}")
+                    print(f"✓ Success with: {cmd}")
                     success = True
                     
-                    # التحقق من أن المحاكي يعمل بعد إعادة التشغيل
-                    time.sleep(3)  # انتظار قليل
+                    # انتظار للتأكد من التشغيل
+                    time.sleep(3)
                     
-                    # التحقق من جميع المحاكيات المحتملة
-                    for emu in possible_emus:
+                    # التحقق من أن المحاكي يعمل
+                    if target_emu:
                         try:
-                            if PY3:
-                                check = subprocess.run(['pgrep', '-x', emu], 
-                                                     capture_output=True, text=True, timeout=5)
-                            else:
-                                check = subprocess.Popen(['pgrep', '-x', emu], 
-                                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                                stdout, stderr = check.communicate()
-                                check.returncode = check.returncode
+                            check = subprocess.run(['pgrep', '-x', target_emu],
+                                                 capture_output=True, text=True)
                             if check.returncode == 0:
-                                print(f"✓ Emulator {emu} is running (PID: {check.stdout.strip()}")
+                                print(f"✓ {target_emu} is running (PID: {check.stdout.strip()})")
+                            else:
+                                print(f"⚠ {target_emu} may not be running after restart")
                         except:
                             pass
                     
@@ -820,147 +1019,169 @@ def restart_emu():
                 else:
                     print(f"✗ Failed (code: {result.returncode})")
                     if result.stderr:
-                        error_msg = result.stderr.strip() if PY3 else result.stderr.decode('utf-8', errors='ignore').strip()
-                        print(f"  Error: {error_msg[:100]}")
+                        print(f"  Error: {result.stderr[:100].strip()}")
                     
-            except subprocess.TimeoutExpired if PY3 else Exception as e:
-                if PY3 and isinstance(e, subprocess.TimeoutExpired):
-                    print(f"⚠ Timeout for: {cmd_str}")
-                    attempts_log.append({
-                        'command': cmd_str,
-                        'error': 'Timeout'
-                    })
-                else:
-                    print(f"⚠ Timeout for: {cmd_str}")
-                    attempts_log.append({
-                        'command': cmd_str,
-                        'error': 'Timeout'
-                    })
-                continue
-            except (IOError, OSError):
-                print(f"⚠ Command not found: {cmd_str}")
+            except subprocess.TimeoutExpired:
+                print(f"⚠ Timeout for: {cmd}")
                 attempts_log.append({
-                    'command': cmd_str,
-                    'error': 'FileNotFound'
+                    'command': cmd,
+                    'error': 'Timeout'
                 })
                 continue
             except Exception as e:
-                error_msg = str(e)
-                print(f"⚠ Error: {error_msg[:50]}...")
+                print(f"⚠ Error executing command: {str(e)[:50]}")
                 attempts_log.append({
-                    'command': cmd_str,
-                    'error': error_msg[:100]
+                    'command': cmd,
+                    'error': str(e)[:100]
                 })
                 continue
         
-        # إذا فشلت جميع الأوامر، حاول بإعادة تشغيل الخدمات العامة
-        if not success:
+        # محاولات استرجاع إضافية إذا فشلت كل المحاولات
+        if not success and target_emu:
             print("\nTrying fallback methods...")
             print("-" * 40)
             
-            fallback_methods = [
-                ('systemctl daemon-reload', ['systemctl', 'daemon-reload']),
-                ('restart softcam service', ['/etc/init.d/softcam', 'restart']),
-                ('restart camd service', ['/etc/init.d/camd', 'restart']),
-                ('killall softcam processes', ['pkill', '-9', 'softcam']),
-                ('killall emu processes', ['pkill', '-9', 'oscam', 'ncam']),
-            ]
-            
-            for method_name, cmd in fallback_methods:
-                try:
-                    print(f"Fallback: {method_name}")
-                    
-                    if method_name == 'killall emu processes':
-                        # قتل جميع عمليات المحاكيات
-                        for emu in possible_emus:
-                            subprocess.run(['pkill', '-9', emu], timeout=3)
-                        time.sleep(2)
-                        # إعادة تشغيل softcam
-                        subprocess.run(['/etc/init.d/softcam', 'restart'], timeout=5)
-                    else:
-                        if isinstance(cmd, list) and '&&' in ' '.join(cmd):
-                            if PY3:
-                                subprocess.run(' '.join(cmd), shell=True, timeout=10)
-                            else:
-                                subprocess.Popen(' '.join(cmd), shell=True).wait()
-                        else:
-                            if PY3:
-                                subprocess.run(cmd, timeout=5)
-                            else:
-                                subprocess.Popen(cmd).wait()
-                    
-                    print(f"✓ Fallback {method_name} executed")
-                    
-                    # انتظار وتأكيد
-                    time.sleep(3)
-                    
-                    # التحقق من وجود أي محاكي يعمل
-                    for emu in possible_emus:
-                        try:
-                            if PY3:
-                                check = subprocess.run(['pgrep', emu], 
-                                                     capture_output=True, text=True, timeout=5)
-                            else:
-                                check = subprocess.Popen(['pgrep', emu], 
-                                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                                stdout, stderr = check.communicate()
-                                check.returncode = check.returncode
-                            if check.returncode == 0:
-                                print(f"✓ Found {emu} after fallback")
-                                success = True
-                        except:
-                            continue
-                    
-                    if success:
-                        break
-                        
-                except Exception as e:
-                    error_msg = str(e)
-                    print(f"✗ Fallback failed: {error_msg[:50]}...")
-                    continue
-        
-        # تسجيل النتائج
-        print("\n" + "=" * 50)
-        print("RESTART PROCESS SUMMARY")
-        print("=" * 50)
-        print(f"Total attempts: {len(attempts_log)}")
-        print(f"Success: {'YES' if success else 'NO'}")
-        
-        if active_emu:
-            print(f"Active emulator from softcam script: {active_emu}")
-        if running_emus:
-            print(f"Running emulators detected: {', '.join(running_emus)}")
-        
-        if not success:
-            print("\nFailed attempts details:")
-            for attempt in attempts_log[-5:]:  # عرض آخر 5 محاولات فاشلة
-                if 'error' in attempt:
-                    print(f"  - {attempt['command'][:50]}... : {attempt['error']}")
-                else:
-                    print(f"  - {attempt['command'][:50]}... : Code {attempt['returncode']}")
-        
-        print("\n" + "=" * 50)
-        
-        if success:
-            # إضافة رسالة نجاح إضافية
-            print("Emulator restart completed successfully!")
-            
-            # محاولة تحديث قاعدة بيانات الخدمات
+            # قتل كل عمليات المحاكي وإعادة التشغيل
             try:
-                print("Updating service database...")
-                db = eDVBDB.getInstance()
-                db.reloadServicelist()
-                print("✓ Service database updated")
-            except:
-                print("⚠ Could not update service database (non-critical)")
+                print("Killing all emulator processes...")
+                for emu in ['oscam', 'ncam', 'cccam', 'mgcamd', 'gbox', 'wicardd', 'softcam', 'camd']:
+                    subprocess.run(['pkill', '-9', emu], timeout=3, capture_output=True)
+                
+                time.sleep(2)
+                
+                # محاولة إعادة التشغيل عبر softcam
+                print("Attempting softcam restart...")
+                result = subprocess.run(['/etc/init.d/softcam', 'restart'],
+                                      timeout=10, capture_output=True, text=True)
+                
+                if result.returncode == 0:
+                    print("✓ Fallback softcam restart succeeded")
+                    success = True
+                else:
+                    print("✗ Fallback also failed")
+                    
+            except Exception as e:
+                print(f"Fallback error: {e}")
         
-        return success
+        # التحقق النهائي - هل هناك أي محاكي يعمل؟
+        final_check_success = False
+        try:
+            print("\nPerforming final emulator check...")
+            possible_emus = ['oscam', 'ncam', 'cccam', 'mgcamd', 'gbox', 'wicardd', 'camd']
+            running_emus = []
+            
+            for emu in possible_emus:
+                try:
+                    result = subprocess.run(['pgrep', emu],
+                                          capture_output=True, text=True)
+                    if result.returncode == 0:
+                        running_emus.append(emu)
+                        print(f"✓ Final check: {emu} is running")
+                except:
+                    continue
+            
+            if running_emus:
+                print(f"✓ Final verification: Found {len(running_emus)} emulator(s) running: {', '.join(running_emus)}")
+                final_check_success = True
+                if not success:
+                    success = True
+                    print("✓ Overriding previous status based on final check")
+            else:
+                print("✗ Final check: No emulators found running")
+        except Exception as e:
+            print(f"Final check error: {e}")
+        
+        # محاولة تحديث قاعدة بيانات الخدمات إذا نجح
+        if success or final_check_success:
+            try:
+                print("Emulator restart completed successfully!")
+                
+                # محاولة تحديث قاعدة بيانات الخدمات
+                try:
+                    from enigma import eDVBDB
+                    db = eDVBDB.getInstance()
+                    db.reloadServicelist()
+                    print("✓ Service database updated")
+                except:
+                    print("⚠ Could not update service database (non-critical)")
+                    
+            except Exception as e:
+                print(f"Post-restart error: {e}")
+        
+        # إرجاع القيمة المناسبة
+        return success or final_check_success
+        
+    except Exception as e:
+        print(f"Critical error in restart_emu_base: {e}")
+        traceback.print_exc()
+        return False
+
+def restart_emu(auto_restart_enabled=True, clean_tmp=True):
+    """
+    الدالة الرئيسية المسؤولة عن تنفيذ إعادة التشغيل
+    تقوم بالتحقق من نوع الصورة وتوجيه المهمة للدالة المناسبة
+    """
+    # التحقق من إعداد إعادة التشغيل التلقائي
+    auto_restart_enabled = get_restart_emu()
+    
+    if not auto_restart_enabled:
+        print("=" * 50)
+        print("Auto restart is disabled by settings. Skipping emulator restart.")
+        print("=" * 50)
+        return {"success": False, "message": "Auto restart disabled"}
+    
+    try:
+        print("=" * 50)
+        print("STARTING EMULATOR RESTART PROCESS")
+        print("=" * 50)
+        
+        # التحقق من نوع الصورة
+        is_openspa = is_openspa_image()
+        
+        if is_openspa:
+            print("\n✓ OpenSPA image detected. Using OpenSPA specific restart method.")
+            result = restart_emu_spa(clean_tmp)
+            
+            print("\n" + "=" * 50)
+            print("OpenSPA RESTART SUMMARY")
+            print("=" * 50)
+            print(f"Success: {'YES' if result['success'] else 'NO'}")
+            print(f"Camdcmd.sh return code: {result.get('camdcmd_returncode', 'N/A')}")
+            print(f"Message: {result.get('message', 'N/A')}")
+            print("=" * 50)
+            
+            return result
+        else:
+            print("\n✓ Non-OpenSPA image detected. Using base restart method.")
+            result_base = restart_emu_base(clean_tmp)
+            
+            print("\n" + "=" * 50)
+            print("BASE RESTART SUMMARY")
+            print("=" * 50)
+            print(f"Success: {'YES' if result_base else 'NO'}")
+            print("=" * 50)
+            
+            # للصور الأخرى غير OpenSPA، نحدد الرسالة بناءً على النجاح
+            message = "restart emulator succesfully" if result_base else "failed restart emulator"
+            return {"success": result_base, "message": message}
         
     except Exception as e:
         print(f"Critical error in restart_emu: {str(e)}")
-        import traceback
         traceback.print_exc()
-        return False
+        return {"success": False, "message": "failed restart emulator"}
+
+def get_restart_emu():
+    """
+    دالة لقراءة إعداد إعادة التشغيل التلقائي من الإعدادات
+    (افتراضي: True)
+    """
+    try:
+        # يمكن تعديل هذه الدالة لقراءة الإعداد من ملف أو قاعدة بيانات
+        # حالياً تُرجع True بشكل افتراضي
+        return True
+    except:
+        return True
+
 
 # =============================================
 # BISS-CA 8-Cell Key Validation & Auto-Fix (Correct 2028 Logic)
@@ -1013,7 +1234,7 @@ def validate_and_fix_biss_8cells(cells):
         return fixed_cells, False, msg
 
     except Exception as e:
-        return None, False, "Validation error: %s" % str(e)
+        return None, False, f"Validation error: {str(e)}"
 
 def get_service_info(session):
     """الحصول على معلومات الخدمة الحالية بطريقة محسنة"""
@@ -1067,7 +1288,7 @@ def get_service_info(session):
         return channel_name, sid, vpid, apid, pmtpid, namespace, is_encrypted
 
     except Exception as e:
-        print("Error getting service info: %s" % str(e))
+        print(f"Error getting service info:  {str(e)}"),
         return None, "Error", 0, 0, 0, 0, 0, False
 
 def get_orbital_position(session):
@@ -1140,7 +1361,7 @@ def get_selected_hash(session):
                 hash_value = "%08X" % hash_value_int  # Capital letters
                 logic_name = "CRC32 ORIGINAL"
             except Exception as e:
-                return None, "Error in CRC32 Original: %s" % str(e)
+                return None, "Error in CRC32 Original:  {str(e)}"
             
         else:
             # Default to CRC32 Original if unknown
@@ -1149,7 +1370,7 @@ def get_selected_hash(session):
                 hash_value = "%08X" % hash_value_int
                 logic_name = "CRC32 ORIGINAL"
             except Exception as e:
-                return None, "Error in CRC32 Original: %s" % str(e)
+                return None, "Error in CRC32 Original:  {str(e)}"
             
         if hash_value:
             return hash_value.upper(), logic_name  # تأكيد الحروف الكبيرة
@@ -1157,8 +1378,8 @@ def get_selected_hash(session):
             return None, "Unknown hash logic: %s" % hash_logic
             
     except Exception as e:
-        print("Error in get_selected_hash: %s" % str(e))
-        return None, "Error generating hash: %s" % str(e)
+        print(f"Error in get_selected_hash:  {str(e)}")
+        return None, f"Error generating hash: {str(e)}"
 
 # =============================================
 # دالة قراءة وعرض شفرات البيس المحفوظة
@@ -1634,46 +1855,41 @@ class FileBrowserScreen(Screen):
         """حركة أسفل"""
         self["filelist"].down()
 
+
 # ==========================
 # OptionMenu Screen
 # ==========================
-from Screens.Screen import Screen
-from Components.ActionMap import ActionMap
-from Components.Label import Label
-from Components.MenuList import MenuList
-from Screens.MessageBox import MessageBox
-import os
-import threading
-import subprocess
-from enigma import eTimer
+# مسار ملف التثبيت (تنفيذ مباشر من GitHub)
+INSTALLER_CMD = "wget -q -O - https://raw.githubusercontent.com/ismail9875/E2BissKeyEditor/refs/heads/main/installer.sh | /bin/bash"
 
-# رابط التثبيت الموحد
-INSTALLER_CMD = (
-    "wget -q -O - "
-    "https://raw.githubusercontent.com/ismail9875/E2BissKeyEditor/refs/heads/main/installer.sh "
-    "| /bin/bash"
-)
 
-class OptionMenuScreen(Screen):
-    """شاشة الإعدادات مع خيارات بسيطة"""
-    
+class OptionMenuScreen(ConfigListScreen, Screen):
+    """Settings screen using ConfigListScreen"""
+
     skin = """
-    <screen position="center,center" flags="wfNoBorder" cornerRadius="20" size="850,400" backgroundColor="#0D000000" title="BISS Key Editor Options">
+    <screen position="center,center" flags="wfNoBorder" cornerRadius="20" size="850,500" backgroundColor="#0D000000" title="BISS Key Editor Options">
         <widget name="title" position="center,5" size="500,60" font="Regular;35" borderWidth="1" borderColor="red" halign="center" valign="center" foregroundColor="#FFD700" backgroundColor="#3C110011" cornerRadius="15" transparent="1" />
-        <widget name="menu" position="50,80" size="750,250" itemHeight="50" font="bold,28" scrollbarMode="showOnDemand" />
-        <widget backgroundColor="#0D000000" foregroundColor="white" font="Regular; 50" zPosition="5" noWrap="1" valign="center" halign="center" position="630,0" render="Label" size="220,70" source="global.CurrentTime" transparent="1">
+        <widget name="config" position="50,150" size="750,200" itemHeight="45" font="bold,32" scrollbarMode="showOnDemand" />
+        <widget backgroundColor="#0D00FF00" foregroundColor="white" font="Regular; 50" zPosition="5" noWrap="1" valign="center" halign="center" position="630,0" render="Label" size="220,70" source="global.CurrentTime" transparent="1">
             <convert type="ClockToText">Format: %-H:%M:%S</convert>
         </widget>
-        <widget backgroundColor="#0D000000" foregroundColor="white" font="Regular; 40" zPosition="5" noWrap="1" valign="center" halign="left" position="20,0" render="Label" size="250,70" source="global.CurrentTime" transparent="1">
+        <widget backgroundColor="#0D000000" foregroundColor="white" font="Regular; 40" zPosition="5" noWrap="1" valign="center" halign="left" position="20,0" render="Label" size="250,70" source="global.CurrentTime" transparent="1"> 
             <convert type="ClockToText">Format:%d %b %Y</convert>
         </widget>
-        <widget name="key_yellow" position="360,350" size="140,40" zPosition="1" font="Regular;25" halign="center" valign="center" backgroundColor="#63000000" foregroundColor="white" transparent="1" />
-        <eLabel name="yellow_button" position="340,360" size="20,20" zPosition="2" cornerRadius="10" backgroundColor="yellow" />
-        <widget name="key_green"  position="520,350" size="140,40" zPosition="1" font="Regular;25" halign="center" valign="center" backgroundColor="#63000000" foregroundColor="white" transparent="1" />
-        <eLabel name="green_button" position="500,360" size="20,20" zPosition="2" cornerRadius="10" backgroundColor="green" />
-        <widget name="key_red" position="200,350" size="140,40" zPosition="1" font="Regular;25" halign="center" valign="center" backgroundColor="#63000000" foregroundColor="white" transparent="1" />
-        <eLabel name="red_button" position="180,360" size="20,20" zPosition="2" cornerRadius="10" backgroundColor="red" />
-        <widget name="info" position="50,310" size="750,25" font="Regular;22" halign="center" valign="center" foregroundColor="#98FB98" backgroundColor="#3C110011" transparent="1" />
+        
+        <widget name="key_red" position="60,450" size="140,40" zPosition="1" font="Regular;25" halign="center" valign="center" backgroundColor="#63000000" foregroundColor="white" transparent="1" />
+        <eLabel name="red_button" position="40,460" size="20,20" zPosition="2" cornerRadius="10" backgroundColor="red" />
+
+        <widget name="key_green" position="260,450" size="140,40" zPosition="1" font="Regular;25" halign="center" valign="center" backgroundColor="#63000000" foregroundColor="white" transparent="1" />
+        <eLabel name="green_button" position="240,460" size="20,20" zPosition="2" cornerRadius="10" backgroundColor="green" />
+
+        <widget name="key_yellow" position="460,450" size="140,40" zPosition="1" font="Regular;25" halign="center" valign="center" backgroundColor="#63000000" foregroundColor="white" transparent="1" />
+        <eLabel name="yellow_button" position="440,460" size="20,20" zPosition="2" cornerRadius="10" backgroundColor="yellow" />
+
+        <widget name="key_blue" position="660,450" size="140,40" zPosition="1" font="Regular;25" halign="center" valign="center" backgroundColor="#63000000" foregroundColor="white" transparent="1" />
+        <eLabel name="blue_button" position="640,460" size="20,20" zPosition="2" cornerRadius="10" backgroundColor="blue" />
+        
+        <widget name="info" position="50,420" size="750,25" font="Regular;22" halign="center" valign="center" foregroundColor="#98FB98" backgroundColor="#3C110011" transparent="1" />
     </screen>
     """
 
@@ -1682,44 +1898,89 @@ class OptionMenuScreen(Screen):
     # ===============================
     def __init__(self, session):
         Screen.__init__(self, session)
+        ConfigListScreen.__init__(self, [])
+        
         self.session = session
         self.update_message = None
+        self.container = None
+        
+        # Get current version
+        self.current_version = self.get_current_version()
+        
+        # Setup ConfigList
+        self.setupConfigList()
 
         self["title"] = Label("Plugin Options")
-        self["menu"] = MenuList([])
-        self["info"] = Label("Use UP/DOWN and OK")
+        self["info"] = Label("Use LEFT/RIGHT to change values")
         self["key_red"] = Label("Cancel")
         self["key_yellow"] = Label("Update")
         self["key_green"] = Label("Save")
+        self["key_blue"] = Label("Set Path")
 
         self["actions"] = ActionMap(
-            ["OkCancelActions", "ColorActions", "DirectionActions"],
+            ["SetupActions", "ColorActions"],
             {
-                "ok": self.keyOk,
                 "cancel": self.keyCancel,
+                "save": self.keySave,
                 "red": self.keyCancel,
                 "yellow": self.keyYellow,
                 "green": self.keySave,
-                "up": self.keyUp,
-                "down": self.keyDown,
+                "blue": self.open_settings,
             },
             -2
         )
 
-        self.onShown.append(self.setupMenuList)
+    # ===============================
+    # Setup Config List
+    # ===============================
+    def setupConfigList(self):
+        """Setup ConfigList settings"""
+        
+        hash_choices = [
+            ("sid_vpid", "SID+VPID"),
+            ("crc32_original", "CRC32 Original")
+        ]
+        
+        self.hash_logic = ConfigSelection(
+            choices=hash_choices,
+            default=config.plugins.E2BissKeyEditor.hash_logic.value
+        )
+        
+        self.auto_restart = ConfigOnOff()
+        self.auto_restart.value = config.plugins.E2BissKeyEditor.auto_restart.value
+        
+        self.custom_path = ConfigOnOff()
+        self.custom_path.value = config.plugins.E2BissKeyEditor.custom_path.value
+        
+        self.custom_path_value = ConfigText(
+            default=config.plugins.E2BissKeyEditor.custom_path_value.value,
+            fixed_size=False
+        )
+        
+        self.custom_path.addNotifier(self.updateConfigList, initial_call=False)
+        
+        self.list = [
+            getConfigListEntry("Hash Logic", self.hash_logic),
+            getConfigListEntry("Auto Restart", self.auto_restart),
+            getConfigListEntry("Enable Custom Path", self.custom_path),
+        ]
+        
+        if self.custom_path.value:
+            self.list.append(getConfigListEntry("Custom Path", self.custom_path_value))
+        
+        self["config"].setList(self.list)
 
-    # ===============================
-    # Menu
-    # ===============================
-    def setupMenuList(self):
-        ensure_settings_file()
-        self["menu"].setList([
-            "Hash Logic: %s" % get_hash_logic(),
-            "Auto Restart: %s" % ("Enabled" if get_restart_emu() else "Disabled"),
-            "Custom Path: %s" % ("Enabled" if get_use_custom_path() else "Disabled"),
-            "Version: %s" % self.get_current_version(),
-        ])
-        self["info"].setText("OK = change | Yellow = update")
+    def updateConfigList(self, configElement=None):
+        self.list = [
+            getConfigListEntry("Hash Logic", self.hash_logic),
+            getConfigListEntry("Auto Restart", self.auto_restart),
+            getConfigListEntry("Enable Custom Path", self.custom_path),
+        ]
+        
+        if self.custom_path.value:
+            self.list.append(getConfigListEntry("Custom Path", self.custom_path_value))
+        
+        self["config"].setList(self.list)
 
     # ===============================
     # Current version
@@ -1741,7 +2002,7 @@ class OptionMenuScreen(Screen):
         self.session.openWithCallback(
             self.confirmUpdate,
             MessageBox,
-            "سيتم فحص الإصدار وتنفيذ التحديث إن وجد.\n\nهل تريد المتابعة؟",
+            "Do you want to check for updates and install if available?",
             MessageBox.TYPE_YESNO
         )
 
@@ -1751,74 +2012,97 @@ class OptionMenuScreen(Screen):
 
         self.update_message = self.session.open(
             MessageBox,
-            "جاري تنفيذ التحديث...\n\nيرجى الانتظار",
+            "Running update process...\n\nThis may take a moment.",
             MessageBox.TYPE_INFO,
-            timeout=2
+            timeout=0
         )
 
-        from enigma import eConsoleAppContainer
         self.container = eConsoleAppContainer()
+        self.container.dataAvail.append(self.updateOutput)
         self.container.appClosed.append(self.updateFinished)
-        self.container.execute(INSTALLER_CMD)
+
+        # ✅ التنفيذ الصحيح لأمر GitHub
+        self.container.execute("sh -c '%s'" % INSTALLER_CMD)
+
+    def updateOutput(self, data):
+        if data:
+            print(f"[BISS Installer]: {data.decode().strip()}")
 
     def updateFinished(self, retval):
         if self.update_message:
             self.update_message.close()
-
+        
         if retval == 0:
+            self.current_version = self.get_current_version()
+            
+            if self.current_version == "0.0.0":
+                message = "Update completed successfully!"
+            else:
+                message = f"Update completed successfully!\n\nCurrent version: {self.current_version}"
+                
             self.session.open(
                 MessageBox,
-                "تم تنفيذ عملية التحديث بنجاح.\n\nقد يتم إعادة تشغيل الواجهة تلقائيًا.",
+                message,
                 MessageBox.TYPE_INFO,
-                timeout=6
+                timeout=8
             )
+            
+            self.setupConfigList()
         else:
             self.session.open(
                 MessageBox,
-                "فشل التحديث أو لا يوجد إصدار أحدث.\n\nتم الحفاظ على النسخة الحالية.",
-                MessageBox.TYPE_WARNING,
+                "Update failed.\n\nCheck console logs for details.",
+                MessageBox.TYPE_ERROR,
                 timeout=6
             )
 
     # ===============================
-    # UI actions
+    # UI actions (باقي السكريبت كما هو)
     # ===============================
-    def keyOk(self):
-        item = self["menu"].getCurrent()
-        if not item:
-            return
-
-        if item.startswith("Hash Logic"):
-            save_setting(
-                "HashLogic",
-                "SID+VPID" if get_hash_logic() == "CRC32 Original" else "CRC32 Original"
-            )
-            self.setupMenuList()
-
-        elif item.startswith("Auto Restart"):
-            save_setting("restart_emu", "False" if get_restart_emu() else "True")
-            self.setupMenuList()
-
-        elif item.startswith("Version"):
-            self.keyYellow()
-
     def keySave(self):
-        self.close()
+        try:
+            config.plugins.E2BissKeyEditor.hash_logic.value = self.hash_logic.value
+            config.plugins.E2BissKeyEditor.auto_restart.value = self.auto_restart.value
+            config.plugins.E2BissKeyEditor.custom_path.value = self.custom_path.value
+            config.plugins.E2BissKeyEditor.custom_path_value.value = self.custom_path_value.value
+            
+            config.plugins.E2BissKeyEditor.save()
+            self.session.open(
+                MessageBox,
+                "Settings saved successfully",
+                MessageBox.TYPE_INFO,
+                timeout=3
+            )
+            self.close()
+        except Exception as e:
+            self.session.open(
+                MessageBox,
+                f"Error saving settings: {str(e)}",
+                MessageBox.TYPE_ERROR,
+                timeout=3
+            )
+
+    def open_settings(self):
+        self.session.openWithCallback(
+            self.on_settings_closed,
+            FileBrowserScreen,
+            mode="settings"
+        )
+
+    def on_settings_closed(self, selected_path=None):
+        if selected_path and isinstance(selected_path, str):
+            self.custom_path_value.value = selected_path
+            config.plugins.E2BissKeyEditor.custom_path_value.value = selected_path
+            self.updateConfigList()
 
     def keyCancel(self):
+        config.plugins.E2BissKeyEditor.load()
         self.close()
-
-    def keyUp(self):
-        self["menu"].up()
-
-    def keyDown(self):
-        self["menu"].down()
 
     def restart_gui(self, answer=False):
         if answer:
             from Screens.Standby import TryQuitMainloop
             self.session.open(TryQuitMainloop, 3)
-
 # =============================================
 # شاشة EditBissKey
 # =============================================
@@ -1861,9 +2145,7 @@ class EditBissKeyScreen(Screen):
         <widget name="comment_value" zPosition="2" transparent="1" position="50,170" size="900,40" font="Regular;25" halign="right" valign="center" foregroundColor="red" backgroundColor="#3DFF1515" cornerRadius="10" />
         <eLabel name="Comment_Effect" cornerRadius="24" position="40,170" size="920,40" backgroundColor="#0DCCEEFF" zPosition="1"/>
 
-        <!-- معلومات الملف -->
-        <widget name="file_info" position="center,380" size="600,40" font="Regular;22" halign="left" valign="center" foregroundColor="#98FB98" backgroundColor="#0D000000" transparent="1" />
-        
+
         <!-- الساعة والتاريخ -->
         <widget backgroundColor="#0D000000" foregroundColor="white" font="Regular; 50" zPosition="5" noWrap="1" valign="center" halign="center" position="750,0" render="Label" size="250,70" source="global.CurrentTime" transparent="1"  >
             <convert type="ClockToText">Format: %-H:%M:%S</convert>
@@ -1872,21 +2154,57 @@ class EditBissKeyScreen(Screen):
             <convert type="ClockToText">Format:%d %b %Y</convert>
         </widget>
         
-        <!-- أزرار التحكم -->
-        <widget name="key_red" position="830,300" size="180,40" zPosition="1" font="Regular;30" halign="left" valign="center" backgroundColor="#0D000000" cornerRadius="25" foregroundColor="red" transparent="1" />
+        <!-- Signal Info from Skin Only -->
+        <widget source="session.FrontendStatus" render="Progress" position="180,510" size="300,20" backgroundColor="#3C110011" foregroundColor="#926F34" transparent="0" zPosition="5" cornerRadius="15">
+            <convert type="FrontendInfo">SNR</convert>
+        </widget>
+        <widget source="session.FrontendStatus" render="Progress" position="180,550" size="300,20" backgroundColor="#3C110011" transparent="0" foregroundColor="#926F34" zPosition="5" cornerRadius="15">
+            <convert type="FrontendInfo">AGC</convert>
+        </widget>
+        <widget source="session.FrontendStatus" render="Label" position="600,430" foregroundColor="yellow" size="200,40" font="Regular; 25" backgroundColor="yellow" halign="center" valign="center" transparent="1">
+            <convert type="FrontendInfo">SNRdB</convert>
+        </widget>
+        
+        <widget source="session.FrontendStatus" render="Label" position="500,500" foregroundColor="white" size="98,40" font="Regular; 30" backgroundColor="yellow" halign="center" valign="center" transparent="1">
+            <convert type="FrontendInfo">SNR</convert>
+        </widget>
+        <widget source="session.FrontendStatus" render="Label" foregroundColor="white" position="500,540" size="98,40" font="Regular; 30" backgroundColor="yellow" halign="center" valign="center" transparent="1"  >
+            <convert type="FrontendInfo">AGC</convert>
+        </widget>
+        
+        <!-- Detailed channel information on the right -->
+        <widget name="info" size="350,45" position="center,300" cornerRadius="25" font="Regular; 30" halign="center" valign="center" foregroundColor="green" backgroundColor="#0DFF00FF" transparent="1" zPosition="3" render="Label" text="Cureent Channel Info" />
+        <widget name="channel_name" position="120,340" size="480,35" font="Regular;25" halign="left" valign="center" foregroundColor="yellow" backgroundColor="#0D000000" transparent="1" zPosition="3" />
+        <widget name="sid_info" position="120,370" size="180,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" zPosition="3"/>
+        <widget name="vpid_info" position="240,370" size="180,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" zPosition="3"/>
+        <widget name="apid_info" position="420,370" size="180,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" zPosition="3"/>
+        <widget name="pmtpid_info" position="600,370" size="180,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" zPosition="3"/>
+        <widget name="tsid_info" position="120,400" size="180,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" zPosition="3"/>
+        <widget name="onid_info" position="240,400" size="320,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" zPosition="3"/>
+        <widget name="namespace_info" position="420,400" size="320,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" zPosition="3"/>
+        <widget name="service_ref" position="120,430" size="480,35" font="Regular;25" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" zPosition="3"/>
+        <widget name="encryption_status" position="600,340" size="180,35" font="Regular;22" halign="left" valign="center" foregroundColor="#FF4500" backgroundColor="#0D000000" transparent="1" zPosition="3"/>
+
+        <!-- AGC, SNR text -->
+        <eLabel name="snr_label" position="120,505" size="60,30" foregroundColor="white" text="SNR" font="Regular_bold; 24" backgroundColor="#0D000000" halign="left" transparent="1" />
+        <eLabel name="agc_label" position="120,545" size="60,30" foregroundColor="white" text="AGC" font="Regular_bold; 24" backgroundColor="#0D000000" halign="left" transparent="1" />
+        
+        <!-- Control buttons at bottom -->
+        <widget name="key_red" position="810,300" size="180,50" zPosition="1" font="Regular;30" halign="left" valign="center" backgroundColor="#0D000000" cornerRadius="25" foregroundColor="red" transparent="1" />
         <eLabel name="red_Button" position="770,310" size="30,30" zPosition="2" cornerRadius="25" backgroundColor="red" />
-
-
-        <widget name="key_green" position="830,360" size="180,40" zPosition="1" font="Regular;30" halign="left" valign="center" backgroundColor="#0D000000" cornerRadius="25" foregroundColor="green" transparent="1" />
-        <eLabel name="green_Button" position="770,370" size="30,30" zPosition="2" cornerRadius="25" backgroundColor="green" />
+        <eLabel name="redButtonEffect" position="780,320" zPosition="3" size="10,10" cornerRadius="10" backgroundColor="#0D000000" />
         
-        <widget name="key_yellow" position="830,420" size="180,40" zPosition="1" font="Regular;30" halign="left" valign="center" backgroundColor="#0D000000" cornerRadius="25" foregroundColor="yellow" transparent="1" />
-        <eLabel name="yellow_Button" position="770,430" size="30,30" zPosition="2" cornerRadius="25" backgroundColor="yellow" />
+        <widget name="key_green" position="810,350" size="180,50" zPosition="1" font="Regular;30" halign="left" valign="center" backgroundColor="#0D000000" cornerRadius="25" foregroundColor="green" transparent="1" />
+        <eLabel name="green_Button" position="770,360" size="30,30" zPosition="2" cornerRadius="25" backgroundColor="green" />
+        <eLabel name="greenButtonEffect" position="780,370" zPosition="3" size="10,10" cornerRadius="10" backgroundColor="#0D000000" />
+
+        <widget name="key_yellow" position="810,400" size="180,50" zPosition="1" font="Regular;27" halign="left" valign="center" backgroundColor="#0D000000" cornerRadius="25" foregroundColor="yellow" transparent="1" />
+        <eLabel name="yellow_Button" position="770,410" size="30,30" zPosition="2" cornerRadius="25" backgroundColor="yellow" />
+        <eLabel name="yellowButtonEffect" position="780,420" zPosition="3" size="10,10" cornerRadius="10" backgroundColor="#0D000000" />
         
-        <widget name="key_blue" position="830,480" size="180,40" zPosition="1" font="Regular;30" halign="lefr" valign="center" backgroundColor="#0D000000" cornerRadius="25" foregroundColor="blue" transparent="1" />
-        <eLabel name="blue_Button" position="770,490" size="30,30" zPosition="2" cornerRadius="25" backgroundColor="blue" />
-
-
+        <widget name="key_blue" position="810,450" size="180,50" zPosition="1" font="Regular;30" halign="left" valign="center" backgroundColor="#0D000000" cornerRadius="25" foregroundColor="blue" transparent="1" />
+        <eLabel name="blue_Button" position="770,460" size="30,30" zPosition="2" cornerRadius="25" backgroundColor="blue" />
+        <eLabel name="blueButtonEffect" position="780,470" zPosition="3" size="10,10" cornerRadius="10" backgroundColor="#0D000000" />
     </screen>
     """
 
@@ -1933,7 +2251,7 @@ class EditBissKeyScreen(Screen):
         
         # تعريف جميع العناصر
         self["title"] = Label("Edit BISS Key")
-        self["help"] = Label("Use 0-9 keys for numbers, UP/DOWN for letters, LEFT/RIGHT for cells")
+        self["help"] = Label("0-9 Numbers | up-down Letters | left-right Cells")
         
         # معلومات الهاش
         self["hash_label"] = Label("Hash ")
@@ -1962,6 +2280,18 @@ class EditBissKeyScreen(Screen):
         file_info = f"📁 File: {biss_key_data.get('file', '')} | 📄 Line: {biss_key_data.get('line', 0)}"
         self["file_info"] = Label(file_info)
         
+        # تعريف عناصر معلومات القناة - هذا هو التصحيح الرئيسي
+        self["channel_name"] = Label("")
+        self["sid_info"] = Label("SID: N/A")
+        self["vpid_info"] = Label("VPID: N/A")
+        self["apid_info"] = Label("APID: N/A")
+        self["pmtpid_info"] = Label("PMTPID: N/A")
+        self["tsid_info"] = Label("TSID: N/A")
+        self["onid_info"] = Label("ONID: N/A")
+        self["namespace_info"] = Label("Namespace: N/A")
+        self["service_ref"] = Label("Ref: N/A")
+        self["encryption_status"] = Label("No signal")
+        self["info"] = Label("Current Service Info")
         # أزرار التحكم
         self["key_green"] = Label("Save")
         self["key_yellow"] = Label("Comment")
@@ -2008,6 +2338,7 @@ class EditBissKeyScreen(Screen):
         
         self.onLayoutFinish.append(self.update_display)
         self.onLayoutFinish.append(self.update_letter_buttons)
+        self.onLayoutFinish.append(self.update_channel_info)  # إضافة تحديث معلومات القناة
         
         print(f"EditBissKeyScreen initialized with key: {self.original_key}")
 
@@ -2060,6 +2391,92 @@ class EditBissKeyScreen(Screen):
                     widget.instance.setForegroundColor(gRGB(0xFFFFFF))  # أبيض
         except Exception as e:
             print(f"Error updating letter buttons: {e}")
+
+    def update_channel_info(self):
+        """Update channel information"""
+        try:
+            service_info = self.get_detailed_service_info()
+            
+            if not service_info or not service_info.get('channel_name'):
+                self.set_default_channel_info()
+                return
+            
+            self["channel_name"].setText(service_info['channel_name'])
+            self["sid_info"].setText("SID %04X" % service_info['sid'])
+            self["vpid_info"].setText("VPID %04X" % service_info['vpid'])
+            self["apid_info"].setText("APID %04X" % service_info['apid'])
+            self["pmtpid_info"].setText("PMTPID %04X" % service_info['pmtpid'])
+            self["tsid_info"].setText("TSID %04X" % service_info['tsid'])
+            self["onid_info"].setText("ONID %04X" % service_info['onid'])
+            self["namespace_info"].setText("NS %08X" % service_info['namespace'])
+            self["service_ref"].setText("Ref %s" % service_info['service_ref'])
+            
+            encryption_text = "Encrypted" if service_info['is_encrypted'] else "FTA"
+            self["encryption_status"].setText(encryption_text)
+            
+        except Exception as e:
+            print(f"Error updating channel info: {str(e)}")
+            self.set_default_channel_info()
+
+    def get_detailed_service_info(self):
+        """Get detailed service information"""
+        try:
+            service = self.session.nav.getCurrentService()
+            if not service:
+                return None
+
+            service_ref = self.session.nav.getCurrentlyPlayingServiceReference()
+            if not service_ref:
+                return None
+
+            service_handler = eServiceCenter.getInstance()
+            service_info_obj = service_handler.info(service_ref)
+            channel_name = service_info_obj.getName(service_ref) if service_info_obj else "Unknown"
+
+            sid = service_ref.getUnsignedData(1)
+            tsid = service_ref.getUnsignedData(2)
+            onid = service_ref.getUnsignedData(3)
+            namespace = service_ref.getUnsignedData(4)
+            
+            info = service.info()
+            if info:
+                vpid = info.getInfo(iServiceInformation.sVideoPID)
+                apid = info.getInfo(iServiceInformation.sAudioPID)
+                pmtpid = info.getInfo(iServiceInformation.sPMTPID)
+                is_encrypted = info.getInfo(iServiceInformation.sIsCrypted) == 1
+            else:
+                vpid = apid = pmtpid = 0
+                is_encrypted = False
+
+            return {
+                'channel_name': channel_name,
+                'sid': sid,
+                'vpid': vpid,
+                'apid': apid,
+                'pmtpid': pmtpid,
+                'tsid': tsid,
+                'onid': onid,
+                'namespace': namespace,
+                'service_ref': str(service_ref.toString()),
+                'is_encrypted': is_encrypted
+            }
+            
+        except Exception as e:
+            print(f"Error getting service info: {str(e)}")
+            return None
+
+    def set_default_channel_info(self):
+        """Default channel information"""
+        self["channel_name"].setText("No channel info")
+        self["sid_info"].setText("SID: N/A")
+        self["vpid_info"].setText("VPID: N/A")
+        self["apid_info"].setText("APID: N/A")
+        self["pmtpid_info"].setText("PMTPID: N/A")
+        self["tsid_info"].setText("TSID: N/A")
+        self["onid_info"].setText("ONID: N/A")
+        self["namespace_info"].setText("Namespace: N/A")
+        self["service_ref"].setText("Ref: N/A")
+        self["encryption_status"].setText("No signal")
 
     def is_valid_hex_char(self, char):
         """التحقق إذا كان الحرف مسموحاً به (0-9, A-F, a-f)"""
@@ -2390,13 +2807,13 @@ class EditBissKeyScreen(Screen):
                 print(f"DEBUG: File does not exist, creating new: {save_path}")
                 # إنشاء محتوى أولي للملف الجديد
                 header = f"""# SoftCam.Key
-    # Updated by E2 BISS Key Editor
-    # {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-    # 
-    # Format: F HASH 00 KEY ; Comment
-    # BISS Keys:
-    
-    """
+# Updated by E2 BISS Key Editor
+# {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+# 
+# Format: F HASH 00 KEY ; Comment
+# BISS Keys:
+
+"""
                 lines = header.split('\n')
             
             # إنشاء سطر المفتاح الجديد
@@ -2567,7 +2984,6 @@ class EditBissKeyScreen(Screen):
                 
         except Exception as e:
             print(f"DEBUG: Error updating original file: {e}")
-
 
 # =============================================
 # شاشة عرض شفرات البيس المحفوظة - نسخة متقدمة
@@ -2969,20 +3385,20 @@ class BissKeysBrowserScreen(Screen):
                 global_index = self.current_page * self.items_per_page + self.current_index
                 
                 # عرض رسالة تأكيد قبل الحذف
-                confirm_msg = f"Are you sure you want to delete this BISS key?\n\n"
-                confirm_msg += f"🔢 Position: {global_index + 1} of {len(self.biss_keys)}\n"
-                confirm_msg += f"📄 Page: {self.current_page + 1}/{(len(self.biss_keys) + self.items_per_page - 1) // self.items_per_page}\n"
+                confirm_msg = f"Are you sure you want to delete this BISS key?\n"
+                #confirm_msg += f"🔢 Position: {global_index + 1} of {len(self.biss_keys)}\n"
+                #confirm_msg += f"📄 Page: {self.current_page + 1}/{(len(self.biss_keys) + self.items_per_page - 1) // self.items_per_page}\n"
                 confirm_msg += f"🔑 Hash: {key['hash']}\n"
                 
                 # تنسيق الشفرة بشكل جميل
                 formatted_key = " ".join([key['key'][i:i+2] for i in range(0, 16, 2)])
                 confirm_msg += f"🔐 Key: {formatted_key}\n"
                 
-                if key['comment'] and key['comment'] != "(No comment)":
-                    confirm_msg += f"💬 Comment: {key['comment']}\n"
+                #if key['comment'] and key['comment'] != "(No comment)":
+                    #confirm_msg += f"💬 Comment: {key['comment']}\n"
                 
-                confirm_msg += f"📁 File: {key['file']}\n"
-                confirm_msg += f"📄 Line: {key['line']}\n\n"
+                #confirm_msg += f"📁 File: {key['file']}\n"
+                #confirm_msg += f"📄 Line: {key['line']}\n\n"
                 confirm_msg += "⚠️ This action cannot be undone!"
                 
                 self.session.openWithCallback(
@@ -3279,10 +3695,15 @@ class AboutScreen(Screen):
         <widget name="feature5" cornerRadius="10" position="50,470" size="730,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0DCCEEFF" />
         
         <!-- زر العودة -->
-        <widget name="key_red" position="350,520" size="150,45" zPosition="1" font="Regular;25" halign="center" valign="center" backgroundColor="#3C110011" cornerRadius="20" foregroundColor="red" transparent="1" />
-        <eLabel name="red_button" position="320,530" size="30,30" zPosition="2" cornerRadius="15" backgroundColor="red" />
-        <eLabel name="red_button_effect" position="330,540" zPosition="3" size="10,10" cornerRadius="5" backgroundColor="#3C110011" />
-    </screen>
+        <widget name="key_red" position="250,520" size="150,45" zPosition="1" font="Regular;25" halign="center" valign="center" backgroundColor="#3C110011" cornerRadius="20" foregroundColor="red" transparent="1" />
+        <eLabel name="red_button" position="220,530" size="30,30" zPosition="2" cornerRadius="15" backgroundColor="red" />
+        <eLabel name="red_button_effect" position="230,540" zPosition="3" size="10,10" cornerRadius="5" backgroundColor="#3C110011" />
+        
+        <eLabel name="blue_button" position="450,530" size="30,30" zPosition="2" cornerRadius="15" backgroundColor="blue" />
+        <widget name="key_blue" position="420,530" size="150,45" zPosition="1" font="Regular;22" halign="left" valign="center" backgroundColor="#3C110011" cornerRadius="10" foregroundColor="blue" transparent="1" />
+        <eLabel name="blue_button_effect" position="430,540" zPosition="3" size="10,10" cornerRadius="5" backgroundColor="#3C110011" />
+
+</screen>
     """
 
     def __init__(self, session):
@@ -3324,13 +3745,24 @@ class AboutScreen(Screen):
         # زر العودة
         self["key_red"] = Label("Back")
         
-        # خريطة الإجراءات
+        self["key_blue"] = Label("How to Use")
+        
+
+            
+
         self["actions"] = ActionMap(["ColorActions", "OkCancelActions"],
-            {
-                "red": self.close,
-                "cancel": self.close,
-                "ok": self.close,
-            }, -1)
+                    {
+                        "red": self.close,
+                        "cancel": self.close,
+                        "ok": self.close,
+                        "blue": self.show_using_mode,
+
+                    }, -1)
+                    
+            # وأضف هذه الدالة:
+    def show_using_mode(self):
+        self.session.open(UsinMode)
+
     
     def read_version_from_file(self, file_path):
         """
@@ -3353,17 +3785,16 @@ class AboutScreen(Screen):
 # =============================================
 # شاشة إدخال الشيفرة الأفقية (HorizontalHexInput) مع التعديلات
 # =============================================
-
 class HorizontalHexInput(Screen):
     skin = """
     <screen position="center,center" flags="wfNoBorder" size="1000,490" title="E2 BISS Key Editor" backgroundColor="#0D000000" cornerRadius="25" >
         <widget name="title" borderWidth="1" borderColor="#FFFF17" position="center,0" size="450,60" font="Regular;40" halign="center" valign="center" cornerRadius="15" foregroundColor="red" backgroundColor="#0D000000" />
-        <widget name="help" position="center,70" size="880,40" font="Regular;25" halign="center" valign="center" cornerRadius="15" foregroundColor="yellow" backgroundColor="#0D000000" />
+        <widget name="help" position="center,60" size="1000,50" font="Regular;40" halign="center" valign="center" cornerRadius="15" foregroundColor="yellow" backgroundColor="#0D0016F8" transparent="1" />
         
-        <!-- عرض الخلايا بشكل أفقي >
+        <!-- Horizontal cells display >
         <widget name="cells" position="1040,110" size="600,60" font="Regular;35" halign="center" valign="center" backgroundColor="#3C110011" foregroundColor="#0D000000" transparent="1" /-->
         
-        <!-- خلايا منفصلة لعرض القيم -->
+        <!-- Individual cells for values -->
         <widget name="cell_0" position="120,130" size="80,60" font="Regular;35" halign="center" valign="center" backgroundColor="#2A2A2A" foregroundColor="white" cornerRadius="15" />
         <widget name="cell_1" position="220,130" size="80,60" font="Regular;35" halign="center" valign="center" backgroundColor="#2A2A2A" foregroundColor="white" cornerRadius="15" />
         <widget name="cell_2" position="320,130" size="80,60" font="Regular;35" halign="center" valign="center" backgroundColor="#2A2A2A" foregroundColor="white" cornerRadius="15" />
@@ -3373,7 +3804,7 @@ class HorizontalHexInput(Screen):
         <widget name="cell_6" position="720,130" size="80,60" font="Regular;35" halign="center" valign="center" backgroundColor="#2A2A2A" foregroundColor="white" cornerRadius="15" />
         <widget name="cell_7" position="820,130" size="80,60" font="Regular;35" halign="center" valign="center" backgroundColor="#2A2A2A" foregroundColor="white" cornerRadius="15" />
         
-        <!-- أزرار الأحرف بشكل عمودي على اليسار -->
+        <!-- Letter buttons vertically on the left -->
         <widget name="key_a" position="10,120" size="80,50" cornerRadius="15" zPosition="1" font="Regular;24" halign="center" valign="center" backgroundColor="#4169E1" foregroundColor="white" />
         <widget name="key_b" position="10,180" size="80,50" cornerRadius="15" zPosition="1" font="Regular;24" halign="center" valign="center" backgroundColor="#4169E1" foregroundColor="white" />
         <widget name="key_c" position="10,240" size="80,50" cornerRadius="15" zPosition="1" font="Regular;24" halign="center" valign="center" backgroundColor="#4169E1" foregroundColor="white" />
@@ -3381,26 +3812,15 @@ class HorizontalHexInput(Screen):
         <widget name="key_e" position="10,360" size="80,50" cornerRadius="15" zPosition="1" font="Regular;24" halign="center" valign="center" backgroundColor="#4169E1" foregroundColor="white" />
         <widget name="key_f" position="10,420" size="80,50" cornerRadius="15" zPosition="1" font="Regular;24" halign="center" valign="center" backgroundColor="#4169E1" foregroundColor="white" />
         
-        <!-- معلومات القناة المفصلة على اليمين -->
-        <widget name="channel_name" position="120,240" size="480,35" font="Regular;25" halign="left" valign="center" foregroundColor="yellow" backgroundColor="#0D000000" transparent="1" />
-        <widget name="sid_info" position="120,270" size="180,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" />
-        <widget name="vpid_info" position="240,270" size="180,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" />
-        <widget name="apid_info" position="420,270" size="180,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" />
-        <widget name="pmtpid_info" position="600,270" size="180,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" />
-        <widget name="tsid_info" position="120,300" size="180,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" />
-        <widget name="onid_info" position="240,300" size="320,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" />
-        <widget name="namespace_info" position="420,300" size="320,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" />
-        <widget name="service_ref" position="120,330" size="480,35" font="Regular;25" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" />
-        
         <widget source="session.CurrentService" render="Label" font="Regular_bold; 25" position="120,365" size="700,40" halign="left" valign="center" zPosition="25" backgroundColor="#0D000000" foregroundColor="#926F34" transparent="1" >
             <convert type="TransponderInfo"/>
         </widget>
 
-        <!-- معلومات الهاش المختار -->
+        <!-- Selected hash information -->
         <widget name="hash_logic_name" position="120,200" size="380,40" font="Regular;24" halign="left" valign="center" foregroundColor="yellow" backgroundColor="#0D000000" transparent="1" />
         <widget name="hash_value" position="520,200" size="200,40" font="Regular;24" halign="left" zPosition="1" valign="center" foregroundColor="yellow" backgroundColor="#0D000000" cornerRadius="10" transparent="1" />
         
-        <!-- حالة التشفير -->
+        <!-- Encryption status -->
         <widget name="encryption_status" position="520,240" cornerRadius="20" size="200,30" font="Regular;22" halign="left" valign="center" foregroundColor="yellow" backgroundColor="#0D000000" transparent="1" />
         
         <widget source="session.CurrentService" foregroundColor="yellow" render="Label" font="Regular; 20" transparent="1" size="300,80" cornerRadius="30" position="670,410" valign="center" halign="center" backgroundColor="red" zPosition="15" >
@@ -3422,8 +3842,6 @@ class HorizontalHexInput(Screen):
         <widget source="session.FrontendStatus" render="Progress" position="180,450" size="300,20" backgroundColor="#3C110011" transparent="0" foregroundColor="#926F34" zPosition="5" cornerRadius="15">
             <convert type="FrontendInfo">AGC</convert>
         </widget>
-        
-             
         <widget source="session.FrontendStatus" render="Label" position="600,330" foregroundColor="yellow" size="200,40" font="Regular; 25" backgroundColor="yellow" halign="center" valign="center" transparent="1">
             <convert type="FrontendInfo">SNRdB</convert>
         </widget>
@@ -3435,26 +3853,38 @@ class HorizontalHexInput(Screen):
             <convert type="FrontendInfo">AGC</convert>
         </widget>
 
+        <!-- Detailed channel information on the right -->
+        <widget name="channel_name" position="120,240" size="480,35" font="Regular;25" halign="left" valign="center" foregroundColor="yellow" backgroundColor="#0D000000" transparent="1" />
+        <widget name="sid_info" position="120,270" size="180,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" />
+        <widget name="vpid_info" position="240,270" size="180,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" />
+        <widget name="apid_info" position="420,270" size="180,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" />
+        <widget name="pmtpid_info" position="600,270" size="180,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" />
+        <widget name="tsid_info" position="120,300" size="180,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" />
+        <widget name="onid_info" position="240,300" size="320,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" />
+        <widget name="namespace_info" position="420,300" size="320,35" font="Regular;22" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" />
+        <widget name="service_ref" position="120,330" size="480,35" font="Regular;25" halign="left" valign="center" foregroundColor="#4169E1" backgroundColor="#0D000000" transparent="1" />
+
+
         <!-- AGC, SNR text -->
         <eLabel name="snr_label" position="120,405" size="60,30" foregroundColor="white" text="SNR" font="Regular_bold; 24" backgroundColor="#0D000000" halign="left" transparent="1" />
         <eLabel name="agc_label" position="120,445" size="60,30" foregroundColor="white" text="AGC" font="Regular_bold; 24" backgroundColor="#0D000000" halign="left" transparent="1" />
         
-        <!-- أزرار التحكم في الأسفل -->
-        <widget name="key_red" position="860,200" size="180,50" zPosition="1" font="Regular;30" halign="left" valign="center" backgroundColor="#0D000000" cornerRadius="25" foregroundColor="red" transparent="1" />
-        <eLabel name="red_Button" position="810,210" size="30,30" zPosition="2" cornerRadius="25" backgroundColor="red" />
-        <eLabel name="redButtonEffect" position="820,220" zPosition="3" size="10,10" cornerRadius="10" backgroundColor="#0D000000" />
+        <!-- Control buttons at bottom -->
+        <widget name="key_red" position="810,200" size="180,50" zPosition="1" font="Regular;30" halign="left" valign="center" backgroundColor="#0D000000" cornerRadius="25" foregroundColor="red" transparent="1" />
+        <eLabel name="red_Button" position="770,210" size="30,30" zPosition="2" cornerRadius="25" backgroundColor="red" />
+        <eLabel name="redButtonEffect" position="780,220" zPosition="3" size="10,10" cornerRadius="10" backgroundColor="#0D000000" />
         
-        <widget name="key_green" position="860,250" size="180,50" zPosition="1" font="Regular;30" halign="left" valign="center" backgroundColor="#0D000000" cornerRadius="25" foregroundColor="green" transparent="1" />
-        <eLabel name="green_Button" position="810,260" size="30,30" zPosition="2" cornerRadius="25" backgroundColor="green" />
-        <eLabel name="greenButtonEffect" position="820,270" zPosition="3" size="10,10" cornerRadius="10" backgroundColor="#0D000000" />
+        <widget name="key_green" position="810,250" size="180,50" zPosition="1" font="Regular;30" halign="left" valign="center" backgroundColor="#0D000000" cornerRadius="25" foregroundColor="green" transparent="1" />
+        <eLabel name="green_Button" position="770,260" size="30,30" zPosition="2" cornerRadius="25" backgroundColor="green" />
+        <eLabel name="greenButtonEffect" position="780,270" zPosition="3" size="10,10" cornerRadius="10" backgroundColor="#0D000000" />
 
-        <widget name="key_yellow" position="860,300" size="180,50" zPosition="1" font="Regular;27" halign="left" valign="center" backgroundColor="#0D000000" cornerRadius="25" foregroundColor="yellow" transparent="1" />
-        <eLabel name="yellow_Button" position="810,310" size="30,30" zPosition="2" cornerRadius="25" backgroundColor="yellow" />
-        <eLabel name="yellowButtonEffect" position="820,320" zPosition="3" size="10,10" cornerRadius="10" backgroundColor="#0D000000" />
+        <widget name="key_yellow" position="810,300" size="180,50" zPosition="1" font="Regular;27" halign="left" valign="center" backgroundColor="#0D000000" cornerRadius="25" foregroundColor="yellow" transparent="1" />
+        <eLabel name="yellow_Button" position="770,310" size="30,30" zPosition="2" cornerRadius="25" backgroundColor="yellow" />
+        <eLabel name="yellowButtonEffect" position="780,320" zPosition="3" size="10,10" cornerRadius="10" backgroundColor="#0D000000" />
         
-        <widget name="key_blue" position="860,350" size="180,50" zPosition="1" font="Regular;30" halign="left" valign="center" backgroundColor="#0D000000" cornerRadius="25" foregroundColor="blue" transparent="1" />
-        <eLabel name="blue_Button" position="810,360" size="30,30" zPosition="2" cornerRadius="25" backgroundColor="blue" />
-        <eLabel name="blueButtonEffect" position="820,370" zPosition="3" size="10,10" cornerRadius="10" backgroundColor="#0D000000" />
+        <widget name="key_blue" position="810,350" size="180,50" zPosition="1" font="Regular;30" halign="left" valign="center" backgroundColor="#0D000000" cornerRadius="25" foregroundColor="blue" transparent="1" />
+        <eLabel name="blue_Button" position="770,360" size="30,30" zPosition="2" cornerRadius="25" backgroundColor="blue" />
+        <eLabel name="blueButtonEffect" position="780,370" zPosition="3" size="10,10" cornerRadius="10" backgroundColor="#0D000000" />
     </screen>
     """
 
@@ -3469,19 +3899,19 @@ class HorizontalHexInput(Screen):
         self.tuner_data = {}
         self.close_directly = True
         
-        # قائمة الأحرف
+        # Letters list
         self.letters = ["A", "B", "C", "D", "E", "F"]
         
-        # تعريف جميع العناصر
+        # Define all elements
         self["title"] = Label("E2 BISS Key Editor")
-        self["help"] = Label("Use 0-9 keys for numbers, UP/DOWN for letters, LEFT/RIGHT for cells")
-        self["cells"] = Label("")  # العرض القديم
+        self["help"] = Label("0-9 numbers, UP/DOWN letters, LEFT/RIGHT cells")
+        self["cells"] = Label("")  # Old display
         
-        # تعريف الخلايا المنفصلة
+        # Define individual cells
         for i in range(8):
             self["cell_%d" % i] = Label("00")
         
-        # معلومات القناة المفصلة
+        # Detailed channel information
         self["channel_name"] = Label("")
         self["sid_info"] = Label("")
         self["vpid_info"] = Label("")
@@ -3492,15 +3922,15 @@ class HorizontalHexInput(Screen):
         self["namespace_info"] = Label("")
         self["service_ref"] = Label("")
         
-        # معلومات الهاش
+        # Hash information
         self["hash_logic_name"] = Label("")
         self["hash_value"] = Label("")
         self["encryption_status"] = Label("")
         
-        # معلومات الإعدادات
+        # Settings information
         self["settings_info"] = Label("")
         
-        # أزرار الأحرف بشكل عمودي
+        # Vertical letter buttons
         self["key_a"] = Label("A")
         self["key_b"] = Label("B")
         self["key_c"] = Label("C")
@@ -3508,10 +3938,10 @@ class HorizontalHexInput(Screen):
         self["key_e"] = Label("E")
         self["key_f"] = Label("F")
         
-        # أزرار التحكم
+        # Control buttons
         self["key_green"] = Label("Save")
         self["key_red"] = Label("Exit")
-        self["key_blue"] = Label("Set Path")
+        self["key_blue"] = Label("Saved Keys")
         self["key_yellow"] = Label("Show Keys")
         
         self["actions"] = ActionMap(["ColorActions", "OkCancelActions", "DirectionActions", "NumberActions", "MenuActions", "InfoActions"],
@@ -3524,9 +3954,9 @@ class HorizontalHexInput(Screen):
                 "cancel": self.close,
                 "green": self.validate_and_save,
                 "red": self.close,
-                "blue": self.open_settings,
+                "blue": self.show_saved_biss_keys,
                 "yellow": self.viewBissKeys,
-                "menu": self.open_option_menu,                       
+                "menu": self.open_option_menu,
                 "info": self.open_about_screen,
                 "0": lambda: self.input_char("0"),
                 "1": lambda: self.input_char("1"),
@@ -3540,7 +3970,7 @@ class HorizontalHexInput(Screen):
                 "9": lambda: self.input_char("9"),
             }, -1)
         
-        # إضافة أزرار الأحرف إلى ActionMap للإدخال المباشر
+        # Add letter buttons to ActionMap for direct input
         self.letter_actions = {
             "a": lambda: self.input_char("A"),
             "b": lambda: self.input_char("B"),
@@ -3557,104 +3987,424 @@ class HorizontalHexInput(Screen):
         self.onLayoutFinish.append(self.update_channel_info)
         self.onLayoutFinish.append(self.update_hash_display)
         self.onLayoutFinish.append(self.update_letter_buttons)
-        self.onLayoutFinish.append(self.update_settings_info)  # تحديث معلومات الإعدادات
+        self.onLayoutFinish.append(self.update_settings_info)
         
-        # حساب الهاش وتحميل الشفرة تلقائياً عند بدء التشغيل
+        # Calculate hash and load key automatically on startup
         self.onShown.append(self.auto_calculate_hash)
 
-    def update_settings_info(self):
-        """تحديث معلومات الإعدادات الحالية"""
+    # ------------------------------------------------------------
+    # Validation and Split Functions
+    # ------------------------------------------------------------
+    
+    def validate_key_format(self, key_value):
+        """Validate key format"""
         try:
-            # الحصول على الإعدادات الحالية من ملف البلوجين
+            if not key_value or len(key_value) != 16:
+                return False, f"Invalid key length: {len(key_value)} (must be 16 characters)"
+            
+            key_value = key_value.upper()
+            
+            if not all(c in '0123456789ABCDEF' for c in key_value):
+                return False, "Contains invalid characters (must be 0-9, A-F only)"
+            
+            return True, key_value
+        except Exception as e:
+            return False, f"Validation error: {str(e)}"
+    
+    def split_key_to_cells(self, key_value):
+        """Split key into cells"""
+        try:
+            cells = []
+            for i in range(0, 16, 2):
+                cell_value = key_value[i:i+2]
+                cells.append(cell_value)
+            return cells
+        except Exception as e:
+            print(f"Error splitting key: {e}")
+            return []
+    
+    # ------------------------------------------------------------
+    # Corrected Key Import Logic (Without MessageBox)
+    # ------------------------------------------------------------
+    
+    def import_key_direct(self, key_value):
+        """Direct key import to cells without MessageBox"""
+        try:
+            # Extract text from any data type
+            if isinstance(key_value, dict):
+                key_value = key_value.get('key', '')
+            elif hasattr(key_value, 'key'):
+                key_value = key_value.key
+            
+            # Validate key
+            valid, result = self.validate_key_format(key_value)
+            if not valid:
+                # Just print error without showing MessageBox
+                print(f"Key import error: {result}")
+                return False
+            
+            key_value = result
+            
+            # Split key into cells
+            cells = self.split_key_to_cells(key_value)
+            if len(cells) != 8:
+                print(f"Error splitting key: {len(cells)} cells (must be 8)")
+                return False
+            
+            # Update cells directly
+            self.cells = cells
+            self.current_cell = 0
+            self.current_char = 0
+            
+            # Update display directly
+            self.update_display()
+            
+            print(f"✓ Key imported directly: {key_value}")
+            print(f"  Cells: {cells}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error importing key: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    # ------------------------------------------------------------
+    # Open Saved Keys Screen
+    # ------------------------------------------------------------
+    
+    def show_saved_biss_keys(self):
+        """Show saved BISS keys - direct import without confirmation"""
+        try:
+            # Read keys directly
+            keys_list = self.read_saved_keys_direct()
+            
+            if not keys_list:
+                # Simple and immediate message
+                self.session.open(
+                    MessageBox,
+                    "No saved keys found",
+                    MessageBox.TYPE_INFO,
+                    timeout=2
+                )
+                return
+            
+            # Open HorizontalHexKeys screen with direct keys passing
+            from . import HorizontalHexKeys
+            self.session.openWithCallback(
+                self.on_key_selected_direct,  # Direct import without confirmation
+                HorizontalHexKeys,
+                keys_list=keys_list,
+                mode="import_direct"
+            )
+            
+        except ImportError:
+            # If HorizontalHexKeys not available, use simple method
+            self._show_keys_simple_list()
+        except Exception as e:
+            print(f"Error opening keys screen: {e}")
+            self._show_keys_simple_list()
+    
+    def on_key_selected_direct(self, selected_key):
+        """Callback when key is selected - direct import"""
+        if selected_key:
+            # Direct import without any MessageBox confirmation
+            success = self.import_key_direct(selected_key)
+            
+            if success:
+                # Just a quick notification without interaction
+                self["help"].setText(f"Key imported: {selected_key[:8]}...")
+                # Reset help text after 2 seconds
+                from enigma import eTimer
+                self.help_timer = eTimer()
+                self.help_timer.callback.append(self.reset_help_text)
+                self.help_timer.start(2000, True)
+    
+    def reset_help_text(self):
+        """Reset help text"""
+        self["help"].setText("0-9 for numbers, UP/DOWN for letters, LEFT/RIGHT for cells")
+    
+    def read_saved_keys_direct(self):
+        """Read saved keys directly"""
+        try:
+            plugin_path = os.path.dirname(os.path.realpath(__file__))
+            saved_keys_file = os.path.join(plugin_path, "SavedKeys")
+            
+            if not os.path.exists(saved_keys_file):
+                return []
+            
+            keys_list = []
+            
+            try:
+                with open(saved_keys_file, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+            except:
+                with open(saved_keys_file, 'r') as f:
+                    lines = f.readlines()
+            
+            for line_num, line in enumerate(lines, 1):
+                line = line.strip()
+                
+                if not line or line.startswith('#') or line.startswith(';'):
+                    continue
+                
+                if ';' in line:
+                    line = line.split(';')[0].strip()
+                if '#' in line:
+                    line = line.split('#')[0].strip()
+                
+                if len(line) == 16:
+                    if all(c in '0123456789ABCDEFabcdef' for c in line):
+                        keys_list.append(line.upper())
+            
+            return keys_list
+            
+        except Exception as e:
+            print(f"Error reading keys: {e}")
+            return []
+    
+    def _show_keys_simple_list(self):
+        try:
+            keys_list = self.read_saved_keys_direct()
+            
+            if not keys_list:
+                return
+            
+            # Show first 3 keys in help text
+            #display_text = ""
+            display_text = f"{keys_list[0]}"
+            #for key in enumerate(keys_list[]):
+                #display_text += f"{keys_list[0]} "
+                #if i < 2:
+                    #display_text += "| "
+            
+            self["help"].setText(display_text)
+            
+            # Store keys for use
+            self.saved_keys_cache = keys_list
+            self.current_key_index = 0
+            
+
+            # Change button map for key navigation
+            self["actions"].actions.update({
+                "left": self.prev_saved_key,
+                "right": self.next_saved_key,
+                "ok": self.import_current_key,
+                "blue": self.reset_to_normal_mode,
+            })
+            
+            self["key_blue"].setText("Back")
+            
+        except Exception as e:
+            print(f"Error in simple display: {e}")
+    
+    def prev_saved_key(self):
+        """Previous key"""
+        if hasattr(self, 'saved_keys_cache') and self.saved_keys_cache:
+            self.current_key_index = (self.current_key_index - 1) % len(self.saved_keys_cache)
+            self.display_current_key()
+    
+    def next_saved_key(self):
+        """Next key"""
+        if hasattr(self, 'saved_keys_cache') and self.saved_keys_cache:
+            self.current_key_index = (self.current_key_index + 1) % len(self.saved_keys_cache)
+            self.display_current_key()
+    
+    def display_current_key(self):
+        """Display current key"""
+        if hasattr(self, 'saved_keys_cache') and self.saved_keys_cache:
+            key = self.saved_keys_cache[self.current_key_index]
+            display_text = f"{key}"
+            #display_text = f"Key {self.current_key_index + 1}/{len(self.saved_keys_cache)}: {key}"
+            self["help"].setText(display_text)
+    
+    def import_current_key(self):
+        """Import current key directly"""
+        if hasattr(self, 'saved_keys_cache') and self.saved_keys_cache:
+            key = self.saved_keys_cache[self.current_key_index]
+            self.import_key_direct(key)
+            self.reset_to_normal_mode()
+    
+    def reset_to_normal_mode(self):
+        """Return to normal mode"""
+        self["help"].setText("0-9 numbers, UP/DOWN letters, LEFT/RIGHT cells")
+        self["key_blue"].setText("Saved Keys")
+        
+        # Restore original button map
+        self["actions"].actions.update({
+            "left": self.left,
+            "right": self.right,
+            "ok": self.input_selected_letter,
+            "blue": self.show_saved_biss_keys,
+        })
+        
+        # Clean cache
+        if hasattr(self, 'saved_keys_cache'):
+            del self.saved_keys_cache
+    
+    # ------------------------------------------------------------
+    # Read and Save Keys (for compatibility with old code)
+    # ------------------------------------------------------------
+    
+    def _read_saved_keys(self):
+        """Read saved keys (for compatibility)"""
+        try:
+            keys_list = self.read_saved_keys_direct()
+            result = []
+            
+            for i, key in enumerate(keys_list):
+                result.append({
+                    'key': key,
+                    'display': f"Key: {key}",
+                    'line_number': i + 1
+                })
+            
+            return result
+            
+        except Exception as e:
+            print(f"Error reading saved keys: {e}")
+            return []
+    
+    def _save_to_saved_keys_file(self, key16):
+        """Save key to SavedKeys file"""
+        try:
+            plugin_path = os.path.dirname(os.path.realpath(__file__))
+            saved_keys_file = os.path.join(plugin_path, "SavedKeys")
+            
+            if not os.path.exists(saved_keys_file):
+                with open(saved_keys_file, 'w', encoding='utf-8') as f:
+                    f.write(key16 + '\n')
+                return True
+            
+            # Read current keys
+            existing_keys = self.read_saved_keys_direct()
+            
+            # Check for duplicates
+            if key16 in existing_keys:
+                print(f"Key already exists: {key16}")
+                return False
+            
+            # Add new key at the top
+            existing_keys.insert(0, key16)
+            
+            # Save file
+            with open(saved_keys_file, 'w', encoding='utf-8') as f:
+                for key in existing_keys[:50]:  # Maximum 50 keys
+                    f.write(key + '\n')
+            
+            print(f"✓ Key saved: {key16}")
+            return True
+            
+        except Exception as e:
+            print(f"Error saving key: {e}")
+            return False
+    
+    # ------------------------------------------------------------
+    # Other Functions (with minor modifications)
+    # ------------------------------------------------------------
+    
+    def update_settings_info(self):
+        """Update settings information"""
+        try:
             hash_logic = get_hash_logic()
             auto_restart = "Enabled" if get_restart_emu() else "Disabled"
             use_custom_path = "Yes" if get_use_custom_path() else "No"
             
-            # تحديث النص
             settings_text = f"Settings: Hash={hash_logic}, AutoRestart={auto_restart}, CustomPath={use_custom_path}"
             self["settings_info"].setText(settings_text)
             
         except Exception as e:
-            print(f"Error updating settings info: {e}")
+            print(f"Error updating settings: {e}")
             self["settings_info"].setText("Settings: Error")
     
-    def auto_calculate_hash(self):
-        """حساب الهاش تلقائياً عند بدء التشغيل باستخدام إعدادات المستخدم"""
+    def update_plugin_settings(self, force_hash_recalculation=True):
+        """Update plugin settings"""
         try:
-            # أولاً، تأكد من وجود ملف الإعدادات
+            self.update_settings_info()
+            old_hash = self.selected_hash
+            
+            if force_hash_recalculation:
+                hash_value, logic_info = get_selected_hash(self.session)
+                
+                if hash_value:
+                    self.selected_hash = hash_value.upper()
+                    self.hash_logic_name = logic_info
+                    self["hash_value"].setText(self.selected_hash)
+                    
+                    hash_changed = (old_hash != self.selected_hash)
+                    
+                    if hash_changed:
+                        key_loaded = self.load_current_channel_key()
+                        if not key_loaded:
+                            self.auto_reset_on_startup()
+                else:
+                    self["hash_value"].setText("Error")
+                    
+            self.update_channel_info()
+            self.update_display()
+            
+            if force_hash_recalculation and old_hash != self.selected_hash:
+                self.session.open(
+                    MessageBox,
+                    f"Settings updated\nHash changed: {old_hash or 'None'} → {self.selected_hash}",
+                    MessageBox.TYPE_INFO,
+                    timeout=2
+                )
+            
+        except Exception as e:
+            print(f"Error updating plugin settings: {e}")
+    
+    def auto_calculate_hash(self):
+        """Auto calculate hash"""
+        try:
             ensure_settings_file()
             
-            print(f"DEBUG: Current hash logic from plugin settings: {get_hash_logic()}")
-            print(f"DEBUG: Auto restart setting: {get_restart_emu()}")
-            print(f"DEBUG: Use custom path: {get_use_custom_path()}")
-            print(f"DEBUG: Custom path: {get_custom_path()}")
-            
-            # حساب الهاش باستخدام إعدادات المستخدم الحالية
             hash_value, logic_info = get_selected_hash(self.session)
             
             if hash_value:
-                self.selected_hash = hash_value.upper()  # Capital letters
+                self.selected_hash = hash_value.upper()
                 self.hash_logic_name = logic_info
                 
-                # الآن البحث عن شفرة القناة الحالية
                 key_found = self.load_current_channel_key()
                 
-                # فقط إذا لم يتم العثور على شفرة، نقوم بتفريغ الخلايا
                 if not key_found:
-                    print("No key found, resetting cells to default")
                     self.auto_reset_on_startup()
-                else:
-                    print("Key loaded successfully, skipping reset")
                 
-                print(f"Auto-calculated hash using {logic_info}: {hash_value}")
+                print(f"Hash calculated: {hash_value}")
             else:
-                print("Auto-hash calculation failed, resetting cells")
                 self.auto_reset_on_startup()
                 
         except Exception as e:
-            print(f"Error in auto hash calculation: {e}")
-            # في حالة الخطأ، نفترض عدم وجود شفرة ونقوم بالتفريغ
+            print(f"Error calculating hash: {e}")
             self.auto_reset_on_startup()
 
     def load_current_channel_key(self):
-        """تحميل شفرة القناة الحالية تلقائياً عند البدء وإرجاع حالة النجاح"""
+        """Load current channel key"""
         try:
             if not self.selected_hash:
-                print("No hash available, skipping key load")
                 return False
             
-            print(f"Searching for key with hash: {self.selected_hash}")
-            
-            # تحديد مسارات البحث بناءً على إعدادات المستخدم
             search_paths = []
             
             use_custom_path = get_use_custom_path()
             custom_path = get_custom_path()
             
             if use_custom_path and custom_path:
-                # أولوية للمسار المخصص من قبل المستخدم
                 search_paths.append(custom_path)
             else:
-                # استخدام المسار الافتراضي
                 search_paths.append("/etc/tuxbox/config/SoftCam.Key")
             
-            # إضافة مسارات أخرى موجودة للنسخ الاحتياطي
             found_paths = detect_softcam_key_paths()
             for path in found_paths:
                 if path not in search_paths:
                     search_paths.append(path)
             
-            print(f"Searching in {len(search_paths)} paths: {search_paths}")
-            
             found_key = None
-            source_file = None
             
-            # البحث في جميع الملفات
             for file_path in search_paths:
                 try:
                     if os.path.exists(file_path):
-                        print(f"Checking file: {file_path}")
-                        
                         if PY3:
                             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                                 content = f.read()
@@ -3662,9 +4412,8 @@ class HorizontalHexInput(Screen):
                             with open(file_path, 'r') as f:
                                 content = f.read()
                         
-                        # البحث عن السطر الذي يحتوي على الهاش الحالي
                         lines = content.split('\n')
-                        for line_num, line in enumerate(lines, 1):
+                        for line in lines:
                             line = line.strip()
                             if line.startswith('F '):
                                 parts = line.split()
@@ -3672,127 +4421,79 @@ class HorizontalHexInput(Screen):
                                     line_hash = parts[1].upper()
                                     if line_hash == self.selected_hash.upper():
                                         key_part = parts[3]
-                                        # التحقق من أن الشفرة صالحة (16 رمز سداسي عشر)
                                         if len(key_part) == 16 and all(c in '0123456789ABCDEFabcdef' for c in key_part):
                                             found_key = key_part.upper()
-                                            source_file = file_path
-                                            print(f"✓ Found key at line {line_num} in {file_path}: {found_key}")
                                             break
                         if found_key:
                             break
                 except Exception as e:
-                    print(f"Error reading {file_path}: {e}")
                     continue
             
             if found_key:
-                # تقسيم الشفرة إلى أزواج من الأحرف (خلايا)
                 key_cells = [found_key[i:i+2] for i in range(0, 16, 2)]
                 
-                # التحقق من صحة الشفرة وتصحيحها
                 fixed_cells, valid, msg = validate_and_fix_biss_8cells(key_cells)
                 
                 if fixed_cells:
-                    # تعيين الخلايا بالشفرة المصححة
                     self.cells = fixed_cells
-                    
-                    # تحديث العرض
                     self.update_display()
-                    
-                    # تسجيل النجاح في السجل
-                    key_display = " ".join(fixed_cells)
-                    print(f"✓ Auto-loaded key: {key_display}")
-                    
                     return True
-                else:
-                    print(f"✗ Found key but validation failed: {msg}")
-                    return False
-            else:
-                print("✗ No key found for current channel hash")
-                return False
+            
+            return False
                 
         except Exception as e:
-            print(f"Error in load_current_channel_key: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"Error loading key: {e}")
             return False
 
     def auto_reset_on_startup(self):
-        """تفريغ جميع الخانات إلى الحالة الافتراضية فقط"""
+        """Reset cells"""
         try:
-            # إعادة تعيين الخلايا إلى القيم الافتراضية
             self.cells = ["00", "00", "00", "00", "00", "00", "00", "00"]
             self.current_cell = 0
             self.current_char = 0
             self.selected_letter_index = 0
             
-            # تحديث العرض
             self.update_display()
             
-            print("✓ All BISS cells reset to default (no key found)")
         except Exception as e:
-            print("Error in auto reset on startup: %s" % str(e))
+            print(f"Error in reset: {str(e)}")
 
     def update_display(self):
-        """تحديث جميع عناصر العرض"""
+        """Update display"""
         try:
-            # تحديث الخلايا المنفصلة
             for i in range(8):
                 cell_widget = self["cell_%d" % i]
                 cell_value = self.cells[i]
                 cell_widget.setText(cell_value)
                 
-                # تحديث الألوان بناءً على الخلية النشطة
                 if i == self.current_cell:
-                    # الخلية النشطة - خلفية زرقاء فاتحة ونص أسود
-                    cell_widget.instance.setBackgroundColor(gRGB(0x926F34))  # ذهبي
-                    cell_widget.instance.setForegroundColor(gRGB(0xFFFFFF))  # أبيض
+                    cell_widget.instance.setBackgroundColor(gRGB(0x926F34))
+                    cell_widget.instance.setForegroundColor(gRGB(0xFFFFFF))
                 else:
-                    # الخلايا غير النشطة - خلفية داكنة ونص أبيض
-                    cell_widget.instance.setBackgroundColor(gRGB(0xE8FFF1))  # بني داكن
-                    cell_widget.instance.setForegroundColor(gRGB(0x000000))  # أصفر فاقع
+                    cell_widget.instance.setBackgroundColor(gRGB(0xE8FFF1))
+                    cell_widget.instance.setForegroundColor(gRGB(0x000000))
             
-            # تحديث ألوان أزرار الأحرف
             self.update_letter_buttons()
             
-            # تحديث العرض النصي القديم (للتوافق)
-            self["cells"].setText(self.get_cells_display())
-            
         except Exception as e:
-            print("Error in update_display: %s" % str(e))
+            print(f"Error updating display: {str(e)}")
 
     def update_letter_buttons(self):
-        """تحديث ألوان أزرار الأحرف بناءً على الحرف المختار"""
+        """Update letter buttons"""
         try:
             for i, letter in enumerate(self.letters):
                 widget = self["key_%s" % letter.lower()]
                 if i == self.selected_letter_index:
-                    # الحرف المختار - خلفية برتقالية ونص أسود
-                    widget.instance.setBackgroundColor(gRGB(0xFFA500))  # برتقالي
-                    widget.instance.setForegroundColor(gRGB(0x000000))  # أسود
+                    widget.instance.setBackgroundColor(gRGB(0xFFA500))
+                    widget.instance.setForegroundColor(gRGB(0x000000))
                 else:
-                    # الأحرف غير المختارة - خلفية زرقاء ونص أبيض
-                    widget.instance.setBackgroundColor(gRGB(0x4169E1))  # أزرق ملكي
-                    widget.instance.setForegroundColor(gRGB(0xFFFFFF))  # أبيض
+                    widget.instance.setBackgroundColor(gRGB(0x4169E1))
+                    widget.instance.setForegroundColor(gRGB(0xFFFFFF))
         except Exception as e:
-            print("Error updating letter buttons: %s" % str(e))
-
-    def get_cells_display(self):
-        """الحصول على نص عرض الخلايا (للتوافق مع الكود القديم)"""
-        display = ""
-        for i, cell in enumerate(self.cells):
-            if i == self.current_cell:
-                display += "[%s] " % cell
-            else:
-                display += " %s  " % cell
-        return display.strip()
-
-    def close_direct(self):
-        """إغلاق مباشر دون تحديث أي displays"""
-        self.close_directly = True
-        self.close()
+            print(f"Error updating letter buttons: {str(e)}")
 
     def close(self):
-        """إغلاق الشاشة مع التحكم في السلوك"""
+        """Close screen"""
         try:
             if hasattr(self, 'signal_timer'):
                 self.signal_timer.stop()
@@ -3800,16 +4501,14 @@ class HorizontalHexInput(Screen):
             pass
         
         if self.close_directly:
-            # إغلاق مباشر دون أي عمليات إضافية
             Screen.close(self)
         else:
-            # إغلاق عادي مع تحديثات (لحالات أخرى)
             Screen.close(self)
         
-        self.close_directly = True  # إعادة تعيين المتغير
+        self.close_directly = True
 
     def update_channel_info(self):
-        """تحديث معلومات القناة المفصلة"""
+        """Update channel information"""
         try:
             service_info = self.get_detailed_service_info()
             
@@ -3817,7 +4516,6 @@ class HorizontalHexInput(Screen):
                 self.set_default_channel_info()
                 return
             
-            # معلومات القناة الأساسية
             self["channel_name"].setText(service_info['channel_name'])
             self["sid_info"].setText("SID %04X" % service_info['sid'])
             self["vpid_info"].setText("VPID %04X" % service_info['vpid'])
@@ -3828,16 +4526,15 @@ class HorizontalHexInput(Screen):
             self["namespace_info"].setText("NS %08X" % service_info['namespace'])
             self["service_ref"].setText("Ref %s" % service_info['service_ref'])
             
-            # حالة التشفير
             encryption_text = "Encrypted" if service_info['is_encrypted'] else "FTA"
             self["encryption_status"].setText(encryption_text)
             
         except Exception as e:
-            print("Error updating channel info: %s" % str(e))
+            print(f"Error updating channel info: {str(e)}")
             self.set_default_channel_info()
 
     def get_detailed_service_info(self):
-        """الحصول على معلومات تفصيلية عن الخدمة الحالية"""
+        """Get detailed service information"""
         try:
             service = self.session.nav.getCurrentService()
             if not service:
@@ -3847,18 +4544,15 @@ class HorizontalHexInput(Screen):
             if not service_ref:
                 return None
 
-            # الحصول على المعلومات الأساسية
             service_handler = eServiceCenter.getInstance()
             service_info_obj = service_handler.info(service_ref)
             channel_name = service_info_obj.getName(service_ref) if service_info_obj else "Unknown"
 
-            # الحصول على جميع المعرفات
-            sid = service_ref.getUnsignedData(1)  # SID
-            tsid = service_ref.getUnsignedData(2)  # TSID
-            onid = service_ref.getUnsignedData(3)  # ONID
-            namespace = service_ref.getUnsignedData(4)  # Namespace
+            sid = service_ref.getUnsignedData(1)
+            tsid = service_ref.getUnsignedData(2)
+            onid = service_ref.getUnsignedData(3)
+            namespace = service_ref.getUnsignedData(4)
             
-            # الحصول على PIDs من معلومات الخدمة
             info = service.info()
             if info:
                 vpid = info.getInfo(iServiceInformation.sVideoPID)
@@ -3883,26 +4577,25 @@ class HorizontalHexInput(Screen):
             }
             
         except Exception as e:
-            print("Error getting detailed service info: %s" % str(e))
+            print(f"Error getting service info: {str(e)}")
             return None
 
     def set_default_channel_info(self):
-        """تعيين معلومات القناة الافتراضية"""
+        """Default channel information"""
         self["channel_name"].setText("No channel info")
         self["sid_info"].setText("SID: N/A")
-        self["vpid_info"].setText("VPID: N/A")
-        self["apid_info"].setText("APID: N/A")
-        self["pmtpid_info"].setText("PMTPID: N/A")
-        self["tsid_info"].setText("TSID: N/A")
-        self["onid_info"].setText("ONID: N/A")
-        self["namespace_info"].setText("Namespace: N/A")
-        self["service_ref"].setText("Ref: N/A")
-        self["encryption_status"].setText("No signal")
+        self["vpid_info"] = Label("VPID: N/A")
+        self["apid_info"] = Label("APID: N/A")
+        self["pmtpid_info"] = Label("PMTPID: N/A")
+        self["tsid_info"] = Label("TSID: N/A")
+        self["onid_info"] = Label("ONID: N/A")
+        self["namespace_info"] = Label("Namespace: N/A")
+        self["service_ref"] = Label("Ref: N/A")
+        self["encryption_status"] = Label("No signal")
 
     def update_hash_display(self):
-        """تحديث عرض معلومات الهاش باستخدام الإعدادات الحالية"""
+        """Update hash display"""
         try:
-            # تحديث اسم منطق الهاش من الإعدادات
             current_logic = get_hash_logic()
                 
             logic_map = {
@@ -3913,7 +4606,6 @@ class HorizontalHexInput(Screen):
             logic_name = logic_map.get(current_logic, "Unknown")
             self["hash_logic_name"].setText("Hash Logic: %s" % logic_name)
             
-            # حساب الهاش باستخدام الإعدادات الحالية
             hash_value, logic_info = get_selected_hash(self.session)
             
             if hash_value:
@@ -3927,240 +4619,168 @@ class HorizontalHexInput(Screen):
             print(f"Error updating hash display: {e}")
     
     def open_option_menu(self):
-        """فتح شاشة الخيارات عند الضغط على زر Menu"""
+        """Open option menu"""
         try:
-            print("DEBUG: Opening OptionMenuScreen...")
-            # افتح شاشة الإعدادات
-            self.session.open(OptionMenuScreen)
-        except Exception as e:
-            print(f"ERROR opening option menu: {e}")
-            import traceback
-            traceback.print_exc()
-            self.session.open(
-                MessageBox,
-                f"Error opening option menu:\n{str(e)[:100]}",
-                MessageBox.TYPE_ERROR,
-                timeout=3
+            self.session.openWithCallback(
+                self.on_option_menu_closed,
+                OptionMenuScreen
             )
-        
+        except Exception as e:
+            print(f"Error opening option menu: {e}")
+    
     def on_option_menu_closed(self, result=None):
-        """Callback عند إغلاق شاشة الخيارات - تحديث الإعدادات"""
+        """Callback when option menu closed"""
         try:
-            print("Option menu closed, updating settings...")
-            
-            # تحديث معلومات الإعدادات
-            self.update_settings_info()
-            
-            # إعادة حساب الهاش مع الإعدادات الجديدة
+            self.update_plugin_settings()
             self.update_hash_display()
-            
-            # محاولة تحميل الشفرة الجديدة للهاش الجديد
-            self.load_current_channel_key()
-            
-            print(f"Settings updated")
-            
         except Exception as e:
             print(f"Error in option menu callback: {e}")
 
     def is_valid_hex_char(self, char):
-        """التحقق إذا كان الحرف مسموحاً به (0-9, A-F, a-f)"""
+        """Check if character is valid"""
         return char in '0123456789ABCDEFabcdef'
 
     def input_char(self, char):
-        """إدخال حرف في الموضع الحالي مع التحقق من الصحة"""
-        # التحقق من أن الحرف مسموح به
+        """Input character"""
         if not self.is_valid_hex_char(char):
             return
         
-        # تحويل الحرف إلى uppercase للتأكد من التنسيق
         char = char.upper()
         
         current_value = self.cells[self.current_cell]
         
         if self.current_char == 0:
-            # استبدال الحرف الأول
             new_value = char + current_value[1]
         else:
-            # استبدال الحرف الثاني
             new_value = current_value[0] + char
         
         self.cells[self.current_cell] = new_value
         
-        # الانتقال التلقائي للحرف التالي
         self.auto_move_next()
         
         self.update_display()
 
     def input_selected_letter(self):
-        """إدخال الحرف المحدد بالأزرار العلوية والسفلية"""
+        """Input selected letter"""
         selected_letter = self.letters[self.selected_letter_index]
         self.input_char(selected_letter)
 
     def auto_move_next(self):
-        """الانتقال التلقائي للحرف أو الخلية التالية"""
+        """Auto move next"""
         if self.current_char == 0:
-            # الانتقال إلى الحرف الثاني في نفس الخلية
             self.current_char = 1
         else:
-            # الانتقال إلى الخلية التالية (الحرف الأول)
             self.current_char = 0
             if self.current_cell < 7:
                 self.current_cell += 1
 
     def up(self):
-        """التنقل بين الأحرف (UP) - للأعلى في العمود"""
+        """Up"""
         if self.selected_letter_index > 0:
             self.selected_letter_index -= 1
         else:
-            self.selected_letter_index = len(self.letters) - 1  # الانتقال للأسفل
+            self.selected_letter_index = len(self.letters) - 1
         self.update_display()
 
     def down(self):
-        """التنقل بين الأحرف (DOWN) - للأسفل في العمود"""
+        """Down"""
         if self.selected_letter_index < len(self.letters) - 1:
             self.selected_letter_index += 1
         else:
-            self.selected_letter_index = 0  # الانتقال للأعلى
+            self.selected_letter_index = 0
         self.update_display()
 
     def left(self):
-        """الانتقال إلى الخلية السابقة (LEFT) - في الصف الأفقي"""
+        """Left"""
         if self.current_cell > 0:
             self.current_cell -= 1
             self.current_char = 0
             self.update_display()
 
     def right(self):
-        """الانتقال إلى الخلية التالية (RIGHT) - في الصف الأفقي"""
+        """Right"""
         if self.current_cell < 7:
             self.current_cell += 1
             self.current_char = 0
             self.update_display()
 
     def open_settings(self):
-        """فتح شاشة الإعدادات لاختيار مسار حفظ الشفرات (الزر الأزرق الآن)"""
+        """Open settings"""
         try:
-            # فتح FileBrowserScreen في وضع الإعدادات
             self.session.openWithCallback(
                 self.on_settings_closed,
                 FileBrowserScreen,
                 mode="settings"
             )
         except Exception as e:
-            print("Error opening settings: %s" % str(e))
-            self.session.open(MessageBox, "Error opening settings", MessageBox.TYPE_ERROR, timeout=2)
+            print(f"Error opening settings: {str(e)}")
 
     def on_settings_closed(self, result=None):
-        """Callback عند إغلاق شاشة الإعدادات"""
+        """Callback when settings closed"""
         try:
-            # تحديث أي معلومات قد تتأثر بالإعدادات
-            print("Settings screen closed")
+            self.update_plugin_settings()
         except Exception as e:
-            print("Error in settings callback: %s" % str(e))
+            print(f"Error in settings callback: {str(e)}")
         self.update_display()
         
     def viewBissKeys(self):
-        """فتح شاشة عرض شفرات البيس"""
+        """View BISS keys"""
         try:
             self.session.open(BissKeysBrowserScreen)
         except Exception as e:
             print(f"Error opening BISS keys browser: {e}")
-            self.session.open(
-                MessageBox,
-                "Error opening BISS keys browser",
-                MessageBox.TYPE_ERROR,
-                timeout=2
-            )
-
-    def confirm_reset(self, result):
-        """تأكيد عملية إعادة التعيين"""
-        if result:
-            try:
-                # إعادة تعيين الخلايا إلى القيم الافتراضية
-                self.cells = ["00", "00", "00", "00", "00", "00", "00", "00"]
-                self.current_cell = 0
-                self.current_char = 0
-                self.selected_letter_index = 0
-                self.selected_hash = None
-                self.hash_logic_name = ""
-                
-                # تحديث العرض
-                self.update_display()
-                self.update_hash_display()
-                
-                # عرض رسالة نجاح مع timeout 3 ثواني
-                self.session.open(
-                    MessageBox,
-                    "All fields have been reset to default values.",
-                    MessageBox.TYPE_INFO,
-                    timeout=3  # ✓ Timeout محدد 3 ثواني
-                )
-            except Exception as e:
-                print("Error resetting fields: %s" % str(e))
-                self.session.open(
-                    MessageBox,
-                    "Error resetting fields. Please try again.",
-                    MessageBox.TYPE_ERROR,
-                    timeout=2  # ✅ Timeout محدد 2 ثانية للأخطاء
-                )
 
     def open_about_screen(self):
-        #"""فتح شاشة معلومات الإضافة عند الضغط على زر Info"""
+        """Open about screen"""
         try:
             self.session.open(AboutScreen)
         except Exception as e:
-            print("Error opening about screen: %s" % str(e))
-            self.session.open(MessageBox, "Error opening about screen", MessageBox.TYPE_ERROR)
+            print(f"Error opening about screen: {str(e)}")
 
     def validate_and_save(self):
-        #"""التحقق من صحة الشيفرة قبل الحفظ"""
+        """Validate and save"""
         try:
-            # أولاً، تحديث الهاش باستخدام الإعدادات الحالية
             self.update_hash_display()
             
-            # التحقق من وجود هاش محدد
             if not self.selected_hash:
-                self.session.open(MessageBox, "No hash available! Please check channel information.", MessageBox.TYPE_ERROR, timeout=3)
+                self.session.open(MessageBox, "No hash available! Check channel information.", MessageBox.TYPE_ERROR, timeout=2)
                 return
             
-            # التحقق من صحة الشيفرة وتصحيحها تلقائياً
             fixed_cells, valid, msg = validate_and_fix_biss_8cells(self.cells)
             
             if fixed_cells is None:
-                self.session.open(MessageBox, msg, MessageBox.TYPE_ERROR, timeout=3)
+                self.session.open(MessageBox, msg, MessageBox.TYPE_ERROR, timeout=2)
                 return
             
-            if valid:
-                # إذا كانت الشيفرة صالحة، حفظ مباشرة
-                self.doSave(fixed_cells)
-            else:
-                # إذا كانت تحتاج تصحيح، حفظ مع التصحيح
-                self.doSave(fixed_cells)
-                
+            key16 = "".join(fixed_cells)
+            channel_info = self.get_channel_info_for_backup()
+            
+            # Save directly without MessageBox confirmation
+            self.doSave(fixed_cells)
+            
         except Exception as e:
-            print("Error in validate_and_save: %s" % str(e))
-            self.session.open(MessageBox, "Validation error: %s" % str(e), MessageBox.TYPE_ERROR, timeout=3)
+            print(f"Error in validation and save: {str(e)}")
+            self.session.open(MessageBox, f"Validation error: {str(e)}", MessageBox.TYPE_ERROR, timeout=2)
 
     def doSave(self, fixed_cells):
-        """حفظ الشيفرة إلى ملف/ملفات SoftCam.Key مع مراعاة إعدادات Auto Restart"""
+        """Save the key"""
         try:
-            # تحديث الخلايا المحلية بالقيم المصححة
             self.cells = fixed_cells
             
-            # إنشاء الشيفرة الكاملة
             key16 = "".join(fixed_cells)
             channel_info = self.get_channel_info_for_backup()
     
-            # إنشاء سطر المفتاح
-            key_line = "F %s 00 %s ;  %s %s" % (self.selected_hash, key16, channel_info, datetime.now().strftime('%Y-%m-%d %H:%M'))
+            key_line = "F %s 00 %s ; %s %s" % (self.selected_hash, key16, channel_info, datetime.now().strftime('%Y-%m-%d %H:%M'))
             
-            # حفظ المفتاح في جميع المسارات
             save_success, save_message = save_key_to_all_paths(key_line)
             
-            # ✅ التحقق من CAID الفعلي للقناة
+            if save_success and key16:
+                self._save_to_saved_keys_file(key16)
+            
+            # DVBAPI section
             dvbapi_success = False
             dvbapi_message = ""
-            
+
             if save_success and self.selected_hash:
                 try:
                     # الحصول على معلومات القناة الحالية
@@ -4384,74 +5004,76 @@ class HorizontalHexInput(Screen):
                     import traceback
                     traceback.print_exc()
                     dvbapi_message = f"\n⚠️ Error detecting channel encryption: {str(e)[:50]}"
+
             
-            # ✅ إعادة تشغيل المحاكي تلقائياً بعد الحفظ - بناءً على إعدادات المستخدم
+            #______________
+            # EMULATOR RESTART SECTION - RESTORED
             restart_success = False
             restart_message = ""
             
             if save_success:
-                # التحقق من إعداد Auto Restart
                 auto_restart_enabled = get_restart_emu()
                 
                 if auto_restart_enabled:
-                    print("DEBUG: Auto Restart is ENABLED - calling restart_emu()")
+                    print(f"DEBUG: Auto Restart is ENABLED - calling restart_emu()")
                     restart_success = restart_emu()
                     
                     if restart_success:
-                        restart_message = "\n🔄 Emulator restarted automatically (Auto Restart: Enabled)"
+                        restart_message = "\nEmulator restarted automatically (Auto Restart: Enabled)"
                     else:
-                        restart_message = "\n⚠️ Emulator restart failed - please restart manually"
+                        restart_message = "\nEmulator restart failed - please restart manually"
                 else:
-                    print("DEBUG: Auto Restart is DISABLED - skipping restart_emu()")
-                    restart_message = "\n⏸️ Emulator restart skipped (Auto Restart: Disabled)"
+                    print(f"DEBUG: Auto Restart is DISABLED - skipping restart_emu()")
+                    restart_message = "\nEmulator restart skipped (Auto Restart: Disabled)"
             
-            # ✅ بناء رسالة النتيجة
+            # Prepare success message
             if save_success:
-                # الحصول على معلومات الإعدادات من ملف البلوجين
                 hash_logic_text = get_hash_logic()
                 auto_restart_status = "Enabled" if get_restart_emu() else "Disabled"
                 use_custom_path_status = "Yes" if get_use_custom_path() else "No"
                 
                 message_parts = [
-                    "✅ Key saved successfully!\n\n",
-                    f"🔑 Hash: {self.selected_hash}\n",
-                    f"🔐 Key: {key16}\n",
-                    f"🎯 Hash Logic: {hash_logic_text}\n",
-                    f"⚙️ Auto Restart: {auto_restart_status}\n",
-                    f"📁 Custom Path: {use_custom_path_status}\n",
-                    f"📁 {save_message}"
+                    "Key saved successfully!\n\n",
+                    #f"Hash: {self.selected_hash}\n",
+                    #f"Key: {key16}\n",
+                    #f"Hash Logic: {hash_logic_text}\n",
+                    #f"Auto Restart: {auto_restart_status}\n",
+                    #f"Custom Path: {use_custom_path_status}\n",
+                    #f"{save_message}"
                 ]
                 
-                if dvbapi_message:
-                    message_parts.append(dvbapi_message)
+                #if dvbapi_message:
+                    #message_parts.append(dvbapi_message)
                 
                 if restart_message:
                     message_parts.append(restart_message)
                 
                 message = "".join(message_parts)
+                
+                self.session.open(
+                    MessageBox,
+                    message,
+                    MessageBox.TYPE_INFO,
+                    timeout=1
+                #
+                )
+                self.update_display()
+                
+                
             else:
-                message = "❌ Save failed!\n\n%s" % save_message
-            
-            # عرض الرسالة
-            self.session.open(
-                MessageBox, 
-                message, 
-                MessageBox.TYPE_INFO if save_success else MessageBox.TYPE_ERROR, 
-                timeout=5
-            )
-            
-            # تفريغ الخانات بعد الحفظ الناجح
-            if save_success:
-                self.auto_reset_on_startup()
+                self.session.open(
+                    MessageBox,
+                    f"Save failed: {save_message}",
+                    MessageBox.TYPE_ERROR,
+                    timeout=3
+                )
             
         except Exception as e:
-            print("Error in doSave: %s" % str(e))
-            import traceback
-            traceback.print_exc()
-            self.session.open(MessageBox, "Save failed:\n%s" % str(e), MessageBox.TYPE_ERROR, timeout=3)    
+            print(f"Error in save: {str(e)}")
+            self.session.open(MessageBox, f"Save failed:\n {str(e)}", MessageBox.TYPE_ERROR, timeout=2)
     
     def get_channel_info_for_backup(self):
-        """الحصول على معلومات القناة للحفظ في النسخة الاحتياطية"""
+        """Get channel information for backup"""
         try:
             service_info = self.get_detailed_service_info()
             if service_info and service_info.get('channel_name'):
@@ -4459,21 +5081,10 @@ class HorizontalHexInput(Screen):
             return "Unknown Channel"
         except:
             return "Unknown Channel"
-            
-    def get_channel_info_for_backup(self):
-        """الحصول على معلومات القناة للحفظ في النسخة الاحتياطية"""
-        try:
-            service_info = self.get_detailed_service_info()
-            if service_info and service_info.get('channel_name'):
-                return "%s, SID: %04X" % (service_info['channel_name'], service_info['sid'])
-            return "Unknown Channel"
-        except:
-            return "Unknown Channel"
-
 
 def main(session, **kwargs):
     # التأكد من وجود ملف الإعدادات في مجلد البلوجين
-    print("DEBUG: Starting E2 BISS Key Editor...")
+    print(f"DEBUG: Starting E2 BISS Key Editor...")
     ensure_settings_file()
     
     # عرض الإعدادات الحالية للتصحيح

@@ -1,36 +1,23 @@
 # -*- coding: utf-8 -*-
 # UsinMode.py - شاشة عرض طريقة استخدام البلوجين
 
-# استدعاءات نظام Enigma2 الأساسية
 from __future__ import absolute_import
 import os
 import sys
-
-# استدعاءات مكونات Enigma2 للشاشة
 from Screens.Screen import Screen
 from Components.ActionMap import ActionMap
 from Components.Label import Label
 from Components.ScrollLabel import ScrollLabel
 from Components.Sources.StaticText import StaticText
 from enigma import eLabel, gFont, RT_HALIGN_LEFT, RT_HALIGN_CENTER, RT_HALIGN_RIGHT, RT_VALIGN_TOP, RT_VALIGN_CENTER, RT_WRAP
-
-
-# استدعاءات للمربعات الحوارية
 from Screens.MessageBox import MessageBox
-
-# استدعاءات إضافية للتصميم
 from enigma import getDesktop
-
-# استدعاء للتعامل مع الألوان
 from skin import parseColor
 
 # ========================================================================
 # شاشة طريقة الاستخدام
 # ========================================================================
-
 class UsinMode(Screen):
-    """شاشة عرض طريقة استخدام البلوجين E2BissKeyEditor"""
-
     skin = """
         <screen name="UsinMode" position="center,center" flags="wfNoBorder" cornerRadius="25" size="1000,700" backgroundColor="#0D000000" title="How to Use E2 BISS Key Editor">
             <!-- العنوان -->
@@ -58,19 +45,19 @@ class UsinMode(Screen):
             <!-- أزرار التحكم -->
             <!-- الزر الأزرق -->
             <eLabel name="blue_button" position="40,600" size="30,30" zPosition="2" cornerRadius="15" backgroundColor="blue" />
-            <widget name="key_blue" position="75,600" size="130,35" zPosition="1" font="Regular;22" halign="left" valign="center" backgroundColor="#1A000000" cornerRadius="10" foregroundColor="blue" transparent="1" />
+            <widget name="key_blue" position="75,600" size="130,35" zPosition="1" font="Regular;22" halign="center" valign="center" backgroundColor="#1A000000" cornerRadius="10" foregroundColor="blue" transparent="1" />
             
             <!-- الزر الأخضر -->
             <eLabel name="green_button" position="210,600" size="30,30" zPosition="2" cornerRadius="15" backgroundColor="green" />
-            <widget name="key_green" position="245,600" size="130,35" zPosition="1" font="Regular;22" halign="left" valign="center" backgroundColor="#1A000000" cornerRadius="10" foregroundColor="green" transparent="1" />
+            <widget name="key_green" position="245,600" size="130,35" zPosition="1" font="Regular;22" halign="center" valign="center" backgroundColor="#1A000000" cornerRadius="10" foregroundColor="green" transparent="1" />
             
             <!-- الزر الأصفر -->
-            <eLabel name="yellow_button" position="380,600" size="30,30" zPosition="2" cornerRadius="15" backgroundColor="yellow" />
-            <widget name="key_yellow" position="415,600" size="130,35" zPosition="1" font="Regular;22" halign="left" valign="center" backgroundColor="#1A000000" cornerRadius="10" foregroundColor="yellow" transparent="1" />
+            <eLabel name="yellow_button" position="400,600" size="30,30" zPosition="2" cornerRadius="15" backgroundColor="yellow" />
+            <widget name="key_yellow" position="445,600" size="130,35" zPosition="1" font="Regular;22" halign="center" valign="center" backgroundColor="#1A000000" cornerRadius="10" foregroundColor="yellow" transparent="1" />
             
             <!-- الزر الأحمر -->
-            <eLabel name="red_button" position="550,600" size="30,30" zPosition="2" cornerRadius="15" backgroundColor="red" />
-            <widget name="key_red" position="585,600" size="130,35" zPosition="1" font="Regular;22" halign="left" valign="center" backgroundColor="#1A000000" cornerRadius="10" foregroundColor="red" transparent="1" />
+            <eLabel name="red_button" position="600,600" size="30,30" zPosition="2" cornerRadius="15" backgroundColor="red" />
+            <widget name="key_red" position="630,600" size="130,35" zPosition="1" font="Regular;22" halign="center" valign="center" backgroundColor="#1A000000" cornerRadius="10" foregroundColor="red" transparent="1" />
             
             <!-- مؤشر الصفحة -->
             <widget name="page_indicator" position="center,655" size="200,25" font="Regular;20" halign="center" valign="center" foregroundColor="#AAAAAA" backgroundColor="#0D000000" transparent="1" />

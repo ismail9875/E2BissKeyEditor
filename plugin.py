@@ -13,6 +13,7 @@ from Screens.Screen import Screen
 from Screens.MessageBox import MessageBox
 from Screens.ChoiceBox import ChoiceBox
 from Screens.VirtualKeyBoard import VirtualKeyBoard
+from Screens.Console import Console  # <-- مهم جدًا للتحديث في Foreground
 from Components.ActionMap import ActionMap
 from Components.Label import Label
 from Components.MenuList import MenuList
@@ -1856,16 +1857,14 @@ class FileBrowserScreen(Screen):
         self["filelist"].down()
 
 
-# ==========================
-# OptionMenu Screen
-# ==========================
-# مسار ملف التثبيت (تنفيذ مباشر من GitHub)
-INSTALLER_CMD = "wget -q -O - https://raw.githubusercontent.com/ismail9875/E2BissKeyEditor/refs/heads/main/installer.sh | /bin/bash"
 
+# ==========================
+# OptionMenu Screen - E2BissKeyEditor
+# ==========================
+INSTALLER_CMD = "wget -q -O - https://raw.githubusercontent.com/ismail9875/E2BissKeyEditor/refs/heads/main/installer.sh | /bin/bash"
 
 class OptionMenuScreen(ConfigListScreen, Screen):
     """Settings screen using ConfigListScreen"""
-
     skin = """
     <screen position="center,center" flags="wfNoBorder" cornerRadius="20" size="850,500" backgroundColor="#0D000000" title="BISS Key Editor Options">
         <widget name="title" position="center,5" size="500,60" font="Regular;35" borderWidth="1" borderColor="red" halign="center" valign="center" foregroundColor="#FFD700" backgroundColor="#3C110011" cornerRadius="15" transparent="1" />
@@ -1893,28 +1892,19 @@ class OptionMenuScreen(ConfigListScreen, Screen):
     </screen>
     """
 
-    # ===============================
-    # INIT
-    # ===============================
     def __init__(self, session):
         Screen.__init__(self, session)
         ConfigListScreen.__init__(self, [])
         
         self.session = session
-        self.update_message = None
-        self.container = None
-        
-        # Get current version
         self.current_version = self.get_current_version()
-        
-        # Setup ConfigList
         self.setupConfigList()
 
-        self["title"] = Label("Plugin Options")
+        self["title"] = Label("BISS Key Editor Options")
         self["info"] = Label("Use LEFT/RIGHT to change values")
         self["key_red"] = Label("Cancel")
-        self["key_yellow"] = Label("Update")
         self["key_green"] = Label("Save")
+        self["key_yellow"] = Label("Update")
         self["key_blue"] = Label("Set Path")
 
         self["actions"] = ActionMap(
@@ -1931,16 +1921,31 @@ class OptionMenuScreen(ConfigListScreen, Screen):
         )
 
     # ===============================
+    # Current version
+    # ===============================
+    def get_current_version(self):
+        path = "/usr/lib/enigma2/python/Plugins/Extensions/E2BissKeyEditor/version"
+        try:
+            if os.path.exists(path):
+                with open(path, "r") as f:
+                    return f.read().strip()
+        except Exception as e:
+            print("[BISS] get_current_version error:", e)
+        return "0.0.0"
+
+    # ===============================
     # Setup Config List
     # ===============================
     def setupConfigList(self):
         """Setup ConfigList settings"""
         
+        # Hash logic choices
         hash_choices = [
             ("sid_vpid", "SID+VPID"),
             ("crc32_original", "CRC32 Original")
         ]
         
+        # Setup Config objects
         self.hash_logic = ConfigSelection(
             choices=hash_choices,
             default=config.plugins.E2BissKeyEditor.hash_logic.value
@@ -1957,52 +1962,44 @@ class OptionMenuScreen(ConfigListScreen, Screen):
             fixed_size=False
         )
         
-        self.custom_path.addNotifier(self.updateConfigList, initial_call=False)
-        
+        # Build ConfigList
         self.list = [
             getConfigListEntry("Hash Logic", self.hash_logic),
             getConfigListEntry("Auto Restart", self.auto_restart),
             getConfigListEntry("Enable Custom Path", self.custom_path),
         ]
         
-        if self.custom_path.value:
-            self.list.append(getConfigListEntry("Custom Path", self.custom_path_value))
-        
+
         self["config"].setList(self.list)
+        
 
     def updateConfigList(self, configElement=None):
+        """Update the ConfigList when custom_path changes"""
+        # Rebuild the list
         self.list = [
             getConfigListEntry("Hash Logic", self.hash_logic),
             getConfigListEntry("Auto Restart", self.auto_restart),
             getConfigListEntry("Enable Custom Path", self.custom_path),
         ]
-        
-        if self.custom_path.value:
-            self.list.append(getConfigListEntry("Custom Path", self.custom_path_value))
+
         
         self["config"].setList(self.list)
-
     # ===============================
-    # Current version
-    # ===============================
-    def get_current_version(self):
-        path = "/usr/lib/enigma2/python/Plugins/Extensions/E2BissKeyEditor/version"
-        try:
-            if os.path.exists(path):
-                with open(path, "r") as f:
-                    return f.read().strip()
-        except Exception as e:
-            print("[BISS] get_current_version error:", e)
-        return "0.0.0"
-
-    # ===============================
-    # Manual update (installer.sh)
+    # Update Functions - Foreground Execution
     # ===============================
     def keyYellow(self):
+        current_version = self.get_current_version()
+        
+        message = "Current version: %s\n\n" % current_version
+        message += "Do you want to check for updates?\n\n"
+        message += "• The update process will run in the foreground.\n"
+        message += "• A console window will show the full progress.\n"
+        message += "• Update will only be installed if a newer version is available."
+
         self.session.openWithCallback(
             self.confirmUpdate,
             MessageBox,
-            "Do you want to check for updates and install if available?",
+            message,
             MessageBox.TYPE_YESNO
         )
 
@@ -2010,99 +2007,120 @@ class OptionMenuScreen(ConfigListScreen, Screen):
         if not answer:
             return
 
-        self.update_message = self.session.open(
-            MessageBox,
-            "Running update process...\n\nThis may take a moment.",
-            MessageBox.TYPE_INFO,
-            timeout=0
+        self.session.openWithCallback(
+            self.updateCallback,
+            Console,
+            title="E2BissKeyEditor - Checking and Updating...",
+            cmdlist=[INSTALLER_CMD],
+            closeOnSuccess=False  # Keeps window open even if no update is performed
         )
 
-        self.container = eConsoleAppContainer()
-        self.container.dataAvail.append(self.updateOutput)
-        self.container.appClosed.append(self.updateFinished)
+    def updateCallback(self, result=None):
+        new_version = self.get_current_version()
 
-        # ✅ التنفيذ الصحيح لأمر GitHub
-        self.container.execute("sh -c '%s'" % INSTALLER_CMD)
-
-    def updateOutput(self, data):
-        if data:
-            print(f"[BISS Installer]: {data.decode().strip()}")
-
-    def updateFinished(self, retval):
-        if self.update_message:
-            self.update_message.close()
-        
-        if retval == 0:
-            self.current_version = self.get_current_version()
-            
-            if self.current_version == "0.0.0":
-                message = "Update completed successfully!"
-            else:
-                message = f"Update completed successfully!\n\nCurrent version: {self.current_version}"
-                
-            self.session.open(
-                MessageBox,
-                message,
-                MessageBox.TYPE_INFO,
-                timeout=8
-            )
-            
-            self.setupConfigList()
+        if new_version != "0.0.0" and new_version != self.current_version:
+            msg = "Update completed successfully!\n\nNew version: %s" % new_version
+            msg_type = MessageBox.TYPE_INFO
         else:
-            self.session.open(
-                MessageBox,
-                "Update failed.\n\nCheck console logs for details.",
-                MessageBox.TYPE_ERROR,
-                timeout=6
-            )
+            msg = "You are already running the latest version.\nNo update was performed."
+            msg_type = MessageBox.TYPE_INFO
+
+        self.session.open(MessageBox, msg, msg_type, timeout=12)
+
+        self.current_version = new_version
+        self.setupConfigList()
+
 
     # ===============================
-    # UI actions (باقي السكريبت كما هو)
+    # UI actions
     # ===============================
     def keySave(self):
+        """Save all settings"""
+        # Update values in config
+        config.plugins.E2BissKeyEditor.hash_logic.value = self.hash_logic.value
+        config.plugins.E2BissKeyEditor.auto_restart.value = self.auto_restart.value
+        config.plugins.E2BissKeyEditor.custom_path.value = self.custom_path.value
+        config.plugins.E2BissKeyEditor.custom_path_value.value = self.custom_path_value.value
+        
+        # Save settings to enigma2 config
+        config.plugins.E2BissKeyEditor.save()
+        
+        # ✅ Export all settings to plugin settings file
         try:
-            config.plugins.E2BissKeyEditor.hash_logic.value = self.hash_logic.value
-            config.plugins.E2BissKeyEditor.auto_restart.value = self.auto_restart.value
-            config.plugins.E2BissKeyEditor.custom_path.value = self.custom_path.value
-            config.plugins.E2BissKeyEditor.custom_path_value.value = self.custom_path_value.value
+            print(f"DEBUG: Exporting settings to plugin settings file...")
             
-            config.plugins.E2BissKeyEditor.save()
-            self.session.open(
-                MessageBox,
-                "Settings saved successfully",
-                MessageBox.TYPE_INFO,
-                timeout=3
-            )
-            self.close()
+            # Prepare settings for export
+            plugin_settings = {}
+            
+            # Map hash logic values to descriptive names
+            hash_logic_mapping = {
+                "sid_vpid": "SID+VPID",
+                "crc32_original": "CRC32 Original"
+            }
+            
+            # Convert hash logic value
+            hash_logic_value = self.hash_logic.value
+            plugin_settings['HashLogic'] = hash_logic_mapping.get(hash_logic_value, hash_logic_value)
+            
+            # Convert auto restart value
+            plugin_settings['restart_emu'] = 'True' if self.auto_restart.value else 'False'
+            
+            # Convert custom path settings
+            plugin_settings['UseCustomPath'] = 'True' if self.custom_path.value else 'False'
+            plugin_settings['custom_save_path'] = self.custom_path_value.value
+            
+            print(f"DEBUG: Settings to export:")
+            print(f"  - HashLogic: {plugin_settings['HashLogic']}")
+            print(f"  - restart_emu: {plugin_settings['restart_emu']}")
+            print(f"  - UseCustomPath: {plugin_settings['UseCustomPath']}")
+            print(f"  - custom_save_path: {plugin_settings['custom_save_path']}")
+            
+            # Save to plugin settings file
+            save_all_settings(plugin_settings)
+            
+            print(f"DEBUG: Settings exported successfully to plugin file")
+            
         except Exception as e:
-            self.session.open(
-                MessageBox,
-                f"Error saving settings: {str(e)}",
-                MessageBox.TYPE_ERROR,
-                timeout=3
-            )
-
-    def open_settings(self):
-        self.session.openWithCallback(
-            self.on_settings_closed,
-            FileBrowserScreen,
-            mode="settings"
+            print(f"ERROR exporting settings to plugin file: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Show success message
+        self.session.open(
+            MessageBox,
+            "Settings saved successfully",
+            MessageBox.TYPE_INFO,
+            timeout=3
         )
+        self.close()
+    
+    def open_settings(self):
+        """فتح شاشة الإعدادات لاختيار مسار حفظ الشفرات (الزر الأزرق الآن)"""
+        try:
+            # فتح FileBrowserScreen في وضع الإعدادات مع callback
+            self.session.openWithCallback(
+                self.on_settings_closed,
+                FileBrowserScreen,
+                mode="settings"
+            )
+        except Exception as e:
+            print(f"Error opening settings: {str(e)}")
+            self.session.open(MessageBox, "Error opening settings", MessageBox.TYPE_ERROR, timeout=2)
 
-    def on_settings_closed(self, selected_path=None):
-        if selected_path and isinstance(selected_path, str):
-            self.custom_path_value.value = selected_path
-            config.plugins.E2BissKeyEditor.custom_path_value.value = selected_path
-            self.updateConfigList()
+    def on_settings_closed(self, result=None):
+        config.plugins.E2BissKeyEditor.custom_path_value.value = self.custom_path_value.value
+
 
     def keyCancel(self):
-        config.plugins.E2BissKeyEditor.load()
+        """Cancel changes and exit"""
+        config.plugins.E2BissKeyEditor.load()  # Reload original settings
         self.close()
 
     def restart_gui(self, answer=False):
         if answer:
             from Screens.Standby import TryQuitMainloop
             self.session.open(TryQuitMainloop, 3)
+
 # =============================================
 # شاشة EditBissKey
 # =============================================
@@ -3699,9 +3717,9 @@ class AboutScreen(Screen):
         <eLabel name="red_button" position="220,530" size="30,30" zPosition="2" cornerRadius="15" backgroundColor="red" />
         <eLabel name="red_button_effect" position="230,540" zPosition="3" size="10,10" cornerRadius="5" backgroundColor="#3C110011" />
         
-        <eLabel name="blue_button" position="450,530" size="30,30" zPosition="2" cornerRadius="15" backgroundColor="blue" />
-        <widget name="key_blue" position="420,530" size="150,45" zPosition="1" font="Regular;22" halign="left" valign="center" backgroundColor="#3C110011" cornerRadius="10" foregroundColor="blue" transparent="1" />
-        <eLabel name="blue_button_effect" position="430,540" zPosition="3" size="10,10" cornerRadius="5" backgroundColor="#3C110011" />
+        <widget name="key_blue" position="470,520" size="150,45" zPosition="1" font="Regular;22" halign="center" valign="center" backgroundColor="#3C110011" cornerRadius="10" foregroundColor="blue" transparent="1" />
+        <eLabel name="blue_button" position="440,530" size="30,30" zPosition="2" cornerRadius="15" backgroundColor="blue" />
+        <eLabel name="blue_button_effect" position="450,540" zPosition="3" size="10,10" cornerRadius="5" backgroundColor="#3C110011" />
 
 </screen>
     """
@@ -5031,32 +5049,40 @@ class HorizontalHexInput(Screen):
                 hash_logic_text = get_hash_logic()
                 auto_restart_status = "Enabled" if get_restart_emu() else "Disabled"
                 use_custom_path_status = "Yes" if get_use_custom_path() else "No"
+
                 
-                message_parts = [
-                    "Key saved successfully!\n\n",
+                self.session.open(
+                    MessageBox,
+                    f"Key Saved successfully\n",
+                    MessageBox.TYPE_INFO,
+                    timeout=2
+                
+                )                
+                #message_parts = [
+                    #"Key saved successfully!\n\n",
                     #f"Hash: {self.selected_hash}\n",
                     #f"Key: {key16}\n",
                     #f"Hash Logic: {hash_logic_text}\n",
                     #f"Auto Restart: {auto_restart_status}\n",
                     #f"Custom Path: {use_custom_path_status}\n",
                     #f"{save_message}"
-                ]
+                #]
                 
                 #if dvbapi_message:
                     #message_parts.append(dvbapi_message)
                 
-                if restart_message:
-                    message_parts.append(restart_message)
+                #if restart_message:
+                    #message_parts.append(restart_message)
                 
-                message = "".join(message_parts)
+                #message = "".join(message_parts)
                 
-                self.session.open(
-                    MessageBox,
-                    message,
-                    MessageBox.TYPE_INFO,
-                    timeout=1
+                #self.session.open(
+                    #MessageBox,
+                    #message,
+                    #MessageBox.TYPE_INFO,
+                    #timeout=1
                 #
-                )
+                #)
                 self.update_display()
                 
                 

@@ -224,20 +224,6 @@ class UsinMode(Screen):
                 Default path is (/etc/tuxbox/config/)
 
 """)
-        
-        sections.append("""**ADDITIONAL INFORMATION**
-======================================================
-=================== E2 BISS Key Editor ===================
-======================================================
-        ★★★ IMPORTANT NOTES ★★★
-            1 - Plugin Version: 2.0
-            2 - Compatible with: Enigma2 based receivers
-            3 - Supported key formats: BISS
-
-
-
-""")
-
         return sections
     
     def calculate_pages(self):

@@ -16,6 +16,7 @@ FILES=(
  "plugin.py"
  "settings"
  "version"
+ "usingMode.py"
  "plugin.png"
 )
 

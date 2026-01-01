@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# -*- # -*- coding: utf-8 -*-
 # Coded Using Ai Tools *** Ismail9875 ***
 # *** *** *** *** *** ***
 #       3 Dec 2025      
@@ -7,17 +7,15 @@ from __future__ import print_function
 from __future__ import absolute_import
 import sys
 
-
 from Plugins.Plugin import PluginDescriptor
 from Screens.Screen import Screen
 from Screens.MessageBox import MessageBox
-from Screens.ChoiceBox import ChoiceBox
 from Screens.VirtualKeyBoard import VirtualKeyBoard
-from Screens.Console import Console  # <-- مهم جدًا للتحديث في Foreground
+from Screens.Console import Console
+from Screens.Standby import TryQuitMainloop
 from Components.ActionMap import ActionMap
 from Components.Label import Label
 from Components.MenuList import MenuList
-from Components.ScrollLabel import ScrollLabel
 from Components.ProgressBar import ProgressBar
 from Components.config import config, ConfigSubsection, ConfigOnOff, ConfigSelection, ConfigText, getConfigListEntry
 from Components.ConfigList import ConfigList, ConfigListScreen
@@ -26,26 +24,15 @@ from datetime import datetime
 import binascii
 import os
 import re
-import zlib
 from array import array
 import subprocess
-import signal
 import time
-import shutil
-from Screens.Standby import TryQuitMainloop
-from skin import parseColor
-import socket
-from twisted.web.client import downloadPage
-import threading
-from enigma import eServiceReference, iServiceInformation, eServiceCenter, eDVBDB, gRGB, eTimer, eConsoleAppContainer
-import requests
-import re
-from distutils.version import LooseVersion
 import glob
-import concurrent.futures
+from enigma import eServiceReference, iServiceInformation, eServiceCenter, eDVBDB, gRGB, eTimer, eConsoleAppContainer
+
 from .usingMode import *
+
 # استيرادات متوافقة مع Python 2 و 3
-import sys
 PY3 = sys.version_info[0] == 3
 try:
     # Python 3
@@ -53,6 +40,7 @@ try:
 except ImportError:
     # Python 2
     from urllib2 import Request as compat_Request, urlopen as compat_urlopen
+
 
 # =============================================
 # دوال قراءة/كتابة إعدادات البلوجين
